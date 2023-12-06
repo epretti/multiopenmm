@@ -20,6 +20,5 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .remd import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble
-from .stack import VirtualSiteProcessor, VirtualSiteHandler
-from .parallel import Manager
+class Manager:
+    pass
