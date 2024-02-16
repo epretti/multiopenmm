@@ -1,5 +1,5 @@
-# This file is part of OpenMMREMD.
-# ©2023 The Regents of the University of California.  All rights reserved.
+# This file is part of MultiOpenMM.
+# ©2024 The Regents of the University of California.  All rights reserved.
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,6 +20,5 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .remd import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble
-from .stack import VirtualSiteProcessor, VirtualSiteHandler
-from .parallel import Manager
+from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble
+from .concurrent import Manager

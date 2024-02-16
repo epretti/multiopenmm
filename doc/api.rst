@@ -4,29 +4,29 @@ Python API
 Simulation setup
 ----------------
 
-.. autoclass:: openmmremd.Simulation
+.. autoclass:: multiopenmm.Simulation
    :members:
 
-.. autoclass:: openmmremd.Ensemble
+.. autoclass:: multiopenmm.Ensemble
    :members:
 
-.. autoclass:: openmmremd.CanonicalEnsemble
-   :members:
-   :show-inheritance:
-
-.. autoclass:: openmmremd.IsothermalIsobaricEnsemble
+.. autoclass:: multiopenmm.CanonicalEnsemble
    :members:
    :show-inheritance:
 
-.. autoclass:: openmmremd.Precision()
+.. autoclass:: multiopenmm.IsothermalIsobaricEnsemble
+   :members:
+   :show-inheritance:
+
+.. autoclass:: multiopenmm.Precision()
    :members:
    :member-order: bysource
 
-.. autoclass:: openmmremd.Thermostat()
+.. autoclass:: multiopenmm.Thermostat()
    :members:
    :member-order: bysource
 
-.. autoclass:: openmmremd.Barostat()
+.. autoclass:: multiopenmm.Barostat()
    :members:
    :member-order: bysource
 
@@ -38,3 +38,23 @@ Task management
 
 Stacking customization
 ----------------------
+
+.. autofunction:: multiopenmm.stack.stack
+
+.. autoclass:: multiopenmm.stack.VirtualSiteProcessor
+   :members:
+
+.. autodata:: multiopenmm.stack.DefaultVirtualSiteProcessor
+   :annotation:
+
+.. autoclass:: multiopenmm.stack.VirtualSiteHandler
+   :members:
+
+.. autoclass:: multiopenmm.stack.ForceProcessor
+   :members:
+
+.. autoclass:: multiopenmm.stack.ForceHandler
+   :members:
+
+.. autodata:: multiopenmm.stack.DefaultForceProcessor
+   :annotation:

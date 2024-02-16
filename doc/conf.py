@@ -4,10 +4,10 @@ import sys
 
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(inspect.getsourcefile(inspect.currentframe()))), "..")))
 
-project = "OpenMMREMD"
+project = "MultiOpenMM"
 author = "Evan Pretti"
 version = "0.1.0"
-copyright = "2023 The Regents of the University of California"
+copyright = "2024 The Regents of the University of California"
 
 templates_path = ["_templates"]
 
