@@ -58,3 +58,12 @@ Stacking customization
 
 .. autodata:: multiopenmm.stack.DefaultForceProcessor
    :annotation:
+
+Miscellaneous
+-------------
+
+.. autoclass:: multiopenmm.MultiOpenMMError
+   :members:
+
+.. autoclass:: multiopenmm.MultiOpenMMWarning
+   :members:

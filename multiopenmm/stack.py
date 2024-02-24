@@ -24,77 +24,142 @@ import abc
 import itertools
 import numpy
 import openmm
+import warnings
 
-def stack(system, temperature_scales):
+from . import support
+
+def stack(templates, template_indices, temperature_scales):
     """
-    Prepares an OpenMM system containing multiple non-interacting copies of a
-    given OpenMM system.  Each copy will have its parameters adjusted so as to
-    sample a configurational distribution with a temperature scaled by a
-    particular amount from the temperature at which the combined system is
-    simulated.
+    Prepares an OpenMM system containing multiple non-interacting molecular
+    system instances, templated from one or more given OpenMM systems.  Each
+    instance will have its parameters adjusted so as to sample a configurational
+    distribution with a temperature scaled by a specified amount from the
+    temperature at which the combined system is simulated.
 
     Parameters
     ----------
-    system : openmm.openmm.System
-        An OpenMM system representing a single copy.
+    templates : iterable of openmm.openmm.System
+        OpenMM systems serving as templates for molecular system instances.
+    template_indices : array of int
+        Indices specifying which template OpenMM system each instance should be
+        an instance of.  The number of indices given will determine the number
+        of instances created in the combined system.
     temperature_scales : array of float
-        The temperature scale factors.  The number of factors given will
-        determine the number of copies created in the combined system.  A scale
-        factor of 1 will result in the corresponding copy sampling a
-        configurational distribution with a temperature equal to that at which
-        the combined system is simulated.
+        The temperature scale factors.  The number of factors given must match
+        the number of template indices given.  A scale factor of 1 will result
+        in the corresponding instance sampling a configurational distribution
+        with a temperature equal to that at which the combined system is
+        simulated.
 
     Returns
     -------
     openmm.openmm.System
-        An OpenMM system containing multiple non-interacting copies of the given
-        system.
+        An OpenMM system containing multiple non-interacting molecular system
+        instances, templated after the specified OpenMM systems, and scaled as
+        specified.
+
+    Notes
+    -----
+    If there are multiple templates in use with default periodic box vectors
+    that differ from one another, the default periodic box vectors from the
+    first template in use will be selected for use in the combined system.  A
+    warning will be issued if this condition is detected; in general, it
+    indicates a problem with the desired combined system, as all instances
+    within must share the same periodic boundaries.
     """
 
-    if not isinstance(system, openmm.System):
-        raise TypeError("system must be an OpenMM System")
+    # Check all system objects.
+    template_list = []
+    for template in templates:
+        if not isinstance(template, openmm.System):
+            raise TypeError("template must be an OpenMM System")
+        template_list.append(template)
 
+    all_template_count = len(template_list)
+
+    # Check template indices.
+    template_indices = numpy.atleast_1d(numpy.asarray(template_indices, dtype=int))
+    if template_indices.ndim != 1:
+        raise ValueError("template_indices must be 1-dimensional")
+
+    if numpy.any((template_indices < 0) | (template_indices >= all_template_count)):
+        # If no templates were given, no valid template indices will exist, so
+        # generate an appropriate error message in this case.
+        raise ValueError(f"template indices must be non-negative and less than {all_template_count}"
+            if all_template_count else "no templates given")
+
+    instance_count = template_indices.size
+
+    # Check temperature scales.
     temperature_scales = numpy.atleast_1d(numpy.asarray(temperature_scales, dtype=float))
     if temperature_scales.ndim != 1:
         raise ValueError("temperature_scales must be 1-dimensional")
+    if temperature_scales.size != instance_count:
+        raise ValueError("template_indices and temperature_scales must have the same shape")
 
-    particle_count = system.getNumParticles()
-    constraint_count = system.getNumConstraints()
-    copy_count = temperature_scales.size
     energy_scales = 1 / temperature_scales
 
-    stacked_system = openmm.System()
+    # Normalize templates and their indices to remove templates not used.
+    template_indices_used, template_indices = numpy.unique(template_indices, return_inverse=True)
+    templates = [template_list[template_index] for template_index in template_indices_used]
 
-    # Copy periodic box vectors.
-    stacked_system.setDefaultPeriodicBoxVectors(*system.getDefaultPeriodicBoxVectors())
-    
+    # Retrieve template properties.
+    particle_counts = [template.getNumParticles() for template in templates]
+    particle_masses = [
+        [template.getParticleMass(particle_index) for particle_index in range(particle_count)]
+        for template, particle_count in zip(templates, particle_counts)
+    ]
+    virtual_sites = [
+        [template.getVirtualSite(particle_index) if template.isVirtualSite(particle_index) else None for particle_index in range(particle_count)]
+        for template, particle_count in zip(templates, particle_counts)
+    ]
+    constraint_counts = [template.getNumConstraints() for template in templates]
+    constraint_parameters = [
+        [template.getConstraintParameters(constraint_index) for constraint_index in range(constraint_count)]
+        for template, constraint_count in zip(templates, constraint_counts)
+    ]
+
+    # Determine the number of particles in each instance and the offset of each
+    # instance in the collection of all of the particles in the combined system.
+    # Keep an additional index giving the total number of particles in the
+    # combined system such that the number of particles in each instance can be
+    # calculated as the differences of each pair of consecutive offsets.
+    particle_offsets = numpy.concatenate(((0,), numpy.cumsum([particle_counts[template_index] for template_index in template_indices])))
+
+    combined_system = openmm.System()
+
+    # Set periodic box vectors.
+    if templates:
+        vectors = templates[0].getDefaultPeriodicBoxVectors()
+        if any(template.getDefaultPeriodicBoxVectors() != vectors for template in templates[1:]):
+            warnings.warn("Mismatched default periodic box vectors; choosing vectors from first template in use", support.MultiOpenMMWarning)
+        combined_system.setDefaultPeriodicBoxVectors(*vectors)
+    else:
+        warnings.warn("No templates in use; default periodic box vectors will have default values", support.MultiOpenMMWarning)
+
     # Create particles.  Scale kinetic energies appropriately.
-    for copy_index, energy_scale in enumerate(energy_scales):
-        for particle_index in range(particle_count):
-            stacked_system.addParticle(energy_scale * system.getParticleMass(particle_index))
+    for template_index, energy_scale in zip(template_indices, energy_scales):
+        for particle_index in range(particle_counts[template_index]):
+            combined_system.addParticle(energy_scale * particle_masses[template_index][particle_index])
 
     # Create constraints.  Offset particle indices appropriately.
-    for copy_index in range(copy_count):
-        offset = copy_index * particle_count
-
-        for constraint_index in range(constraint_count):
-            particle_index_1, particle_index_2, distance = system.getConstraintParameters(constraint_index)
-            stacked_system.addConstraint(particle_index_1 + offset, particle_index_2 + offset, distance)
+    for template_index, particle_offset in zip(template_indices, particle_offsets):
+        for constraint_index in range(constraint_counts[template_index]):
+            particle_index_1, particle_index_2, distance = constraint_parameters[template_index][constraint_index]
+            combined_system.addConstraint(particle_index_1 + particle_offset, particle_index_2 + particle_offset, distance)
 
     # Create virtual sites.
-    for copy_index in range(copy_count):
-        offset = copy_index * particle_count
-
-        for particle_index in range(particle_count):
-            if system.isVirtualSite(particle_index):
-                stacked_system.setVirtualSite(particle_index + offset, DefaultVirtualSiteProcessor._process(system.getVirtualSite(particle_index), offset))
+    for template_index, particle_offset in zip(template_indices, particle_offsets):
+        for particle_index in range(particle_counts[template_index]):
+            virtual_site = virtual_sites[template_index][particle_index]
+            if virtual_site is not None:
+                combined_system.setVirtualSite(particle_index + particle_offset, DefaultVirtualSiteProcessor._process(virtual_site, particle_offset))
 
     # Create forces.
-    for force_index in range(system.getNumForces()):
-        for force in DefaultForceProcessor._process(system.getForce(force_index), particle_count, energy_scales):
-            stacked_system.addForce(force)
+    for force in DefaultForceProcessor._process(templates, template_indices, particle_offsets, energy_scales):
+        combined_system.addForce(force)
 
-    return stacked_system
+    return combined_system
 
 class Processor(abc.ABC):
     # Represents a generic processor that allows handlers for specific types of
@@ -137,18 +202,12 @@ class Processor(abc.ABC):
 
         pass
 
-    def _process(self, item, *args, **kwargs):
-        handler_table = self._handler_table
-        item_type = type(item)
+    @abc.abstractmethod
+    def _process(self, *args, **kwargs):
+        # This method can be overridden in subclasses to handle processing of,
+        # e.g., single items or entire sets of items.
 
-        # When processing an item, search through its method resolution order
-        # list such that the handler table will be searched first for the type
-        # of the item, followed by base classes.
-        for base_type in item_type.mro():
-            if base_type in handler_table:
-                return handler_table[base_type].handle(item, *args, **kwargs)
-        else:
-            raise TypeError(f"{item_type.__name__} is unsupported")
+        raise NotImplementedError
 
 class VirtualSiteProcessor(Processor):
     """
@@ -172,6 +231,19 @@ class VirtualSiteProcessor(Processor):
         if not isinstance(handler, VirtualSiteHandler):
             raise TypeError("handler must be a VirtualSiteHandler")
 
+    def _process(self, site, particle_offset):
+        handler_table = self._handler_table
+        site_type = type(site)
+
+        # When processing a virtual site, search through its method resolution
+        # order list such that the handler table will be searched first for the
+        # type of the virtual site itself, followed by base classes.
+        for base_type in site_type.mro():
+            if base_type in handler_table:
+                return handler_table[base_type].handle(site, particle_offset)
+        else:
+            raise TypeError(f"{site_type.__name__} is unsupported")
+
 class VirtualSiteHandler(abc.ABC):
     """
     An abstract class that can be inherited from to define a custom handler for
@@ -187,7 +259,7 @@ class VirtualSiteHandler(abc.ABC):
             def handled_types(self):
                 return (MyCustomOpenMMVirtualSite,)
 
-            def handle(self, site, offset):
+            def handle(self, site, particle_offset):
                 ...
                 return MyCustomOpenMMVirtualSite(...)
 
@@ -212,20 +284,23 @@ class VirtualSiteHandler(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def handle(self, site, offset):
+    def handle(self, site, particle_offset):
         """
-        Creates a copy of a virtual site for use in a stacked system.
+        Creates a copy of a virtual site for use in a combined system.
 
         Parameters
         ----------
         site : openmm.openmm.VirtualSite
             The virtual site to create a copy of.
-        offset : int
-            The starting index of particles in a particular copy of an OpenMM
-            system being created for the stacked system that this copy of the
-            given virtual site is being created for.  In a system of :math:`N`
-            particles being made into a stacked system containing :math:`M`
-            copies of it, the offsets will be :math:`0,N,2N,\\ldots,(M-1)N`.
+        particle_offset : int
+            The starting index of particles in a particular molecular system
+            instance being created for the combined system that this copy of the
+            given virtual site is being created for.  If the combined system has
+            :math:`M` molecular simulation instances containing :math:`N_1`,
+            :math:`N_2`, :math:`\\ldots`, :math:`N_M` particles in turn, the
+            offsets will be, respectively, :math:`0`, :math:`N_1`,
+            :math:`N_1+N_2`, :math:`\\ldots`, :math:`\\sum_{i=1}^{M-2}N_i`,
+            :math:`\\sum_{i=1}^{M-1}N_i`.
         
         Returns
         -------
@@ -248,10 +323,10 @@ class TwoParticleAverageSiteHandler(VirtualSiteHandler):
     def handled_types(self):
         return (openmm.TwoParticleAverageSite,)
 
-    def handle(self, site, offset):
+    def handle(self, site, particle_offset):
         return openmm.TwoParticleAverageSite(
-            site.getParticle(0) + offset,
-            site.getParticle(1) + offset,
+            site.getParticle(0) + particle_offset,
+            site.getParticle(1) + particle_offset,
             site.getWeight(0),
             site.getWeight(1),
         )
@@ -263,11 +338,11 @@ class ThreeParticleAverageSiteHandler(VirtualSiteHandler):
     def handled_types(self):
         return (openmm.ThreeParticleAverageSite,)
 
-    def handle(self, site, offset):
+    def handle(self, site, particle_offset):
         return openmm.ThreeParticleAverageSite(
-            site.getParticle(0) + offset,
-            site.getParticle(1) + offset,
-            site.getParticle(2) + offset,
+            site.getParticle(0) + particle_offset,
+            site.getParticle(1) + particle_offset,
+            site.getParticle(2) + particle_offset,
             site.getWeight(0),
             site.getWeight(1),
             site.getWeight(2),
@@ -280,11 +355,11 @@ class OutOfPlaneSiteHandler(VirtualSiteHandler):
     def handled_types(self):
         return (openmm.OutOfPlaneSite,)
 
-    def handle(self, site, offset):
+    def handle(self, site, particle_offset):
         return openmm.OutOfPlaneSite(
-            site.getParticle(0) + offset,
-            site.getParticle(1) + offset,
-            site.getParticle(2) + offset,
+            site.getParticle(0) + particle_offset,
+            site.getParticle(1) + particle_offset,
+            site.getParticle(2) + particle_offset,
             site.getWeight12(),
             site.getWeight13(),
             site.getWeightCross(),
@@ -297,9 +372,9 @@ class LocalCoordinatesSiteHandler(VirtualSiteHandler):
     def handled_types(self):
         return (openmm.LocalCoordinatesSite,)
 
-    def handle(self, site, offset):
+    def handle(self, site, particle_offset):
         return openmm.LocalCoordinatesSite(
-            [site.getParticle(particle_index) + offset for particle_index in range(site.getNumParticles())],
+            [site.getParticle(particle_index) + particle_offset for particle_index in range(site.getNumParticles())],
             site.getOriginWeights(),
             site.getXWeights(),
             site.getYWeights(),
@@ -327,6 +402,47 @@ class ForceProcessor(Processor):
         if not isinstance(handler, ForceHandler):
             raise TypeError("handler must be a ForceHandler")
 
+    def _process(self, templates, template_indices, particle_offsets, energy_scales):
+        handler_table = self._handler_table
+
+        # Create tables of forces to be passed to each force handler that can
+        # accept them.
+        force_tables = {}
+        for template_index, template in enumerate(templates):
+            for force_index in range(template.getNumForces()):
+                force = template.getForce(force_index)
+                force_type = type(force)
+
+                # When processing a force, search through its method resolution
+                # order list such that the force table will be searched first
+                # for the type of the force itself, followed by base classes.
+                for base_type in force_type.mro():
+                    if base_type in handler_table:
+                        # For each force handler, group forces by force group
+                        # (forces from each template in each force group will be
+                        # handled separately) and then by template index.
+                        force_tables.setdefault(handler_table[base_type], {}).setdefault(force.getForceGroup(), {}).setdefault(template_index, []).append(force)
+                        break
+                else:
+                    raise TypeError(f"{force_type.__name__} is unsupported")
+
+        # Call each handler with all of the forces collected for it.
+        for handler, force_table in force_tables.items():
+            # Each value in the force table is constructed as a dictionary
+            # mapping from a force group index to a dictionary mapping from a
+            # template index to a list of forces.  Process each group,
+            # converting its dictionary to a nested list and noting that if no
+            # forces matching a particular handler were found in a given
+            # template for the given force group, no key will exist for the
+            # template.
+            handler_name = "+".join(handled_type.__name__ for handled_type in handler.handled_types)
+            for force_group, group_force_table in force_table.items():
+                group_force_table_array = [group_force_table.get(template_index, []) for template_index in range(len(templates))]
+                for force_index, force in enumerate(handler.handle(group_force_table_array, template_indices, particle_offsets, energy_scales)):
+                    force.setForceGroup(force_group)
+                    force.setName(f"{handler_name}:{force_group}:{force_index}")
+                    yield force
+
 class ForceHandler(abc.ABC):
     """
     An abstract class that can be inherited from to define a custom handler for
@@ -342,7 +458,7 @@ class ForceHandler(abc.ABC):
             def handled_types(self):
                 return (MyCustomOpenMMForce,)
 
-            def _handle(self, force, particle_count, energy_scales):
+            def handle(self, force_table, template_indices, particle_offsets, energy_scales):
                 ...
                 yield MyCustomOpenMMForce(...)
 
@@ -366,45 +482,44 @@ class ForceHandler(abc.ABC):
 
         raise NotImplementedError
 
-    def handle(self, force, particle_count, energy_scales):
-        # All Force objects have a Name and a ForceGroup that can be copied.
-        # _handle() is deferred to for type-specific details.
-        for stacked_force in self._handle(force, particle_count, energy_scales):
-            stacked_force.setName(force.getName())
-            stacked_force.setForceGroup(force.getForceGroup())
-            yield stacked_force
-
     @abc.abstractmethod
-    def _handle(self, force, particle_count, energy_scales):
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
         """
-        Creates forces representing a copy of a force for use in a stacked
-        system.
-
-        :meta public:
+        Creates forces representing combinations of other forces for use in a
+        combined system.
 
         Parameters
         ----------
-        force : openmm.openmm.Force
-            The force to copy.
-        particle_count : int
-            The number of particles in the OpenMM system from which a stacked
-            system is being created.
+        force_table : list of list of openmm.openmm.Force
+            For each template OpenMM system, a list of forces to be handled.
+        template_indices : array of int
+            For each molecular system instance contained within the combined
+            OpenMM system within which the created forces will be contained, the
+            index of the template OpenMM system upon which it should be based.
+        particle_offsets : array of int
+            For each instance, the particle index in the combined system
+            corresponding to the first particle in the instance, followed by the
+            total number of particles in the combined system (such that the
+            differences of consecutive offsets give the numbers of particles in
+            each instance).
         energy_scales : array of float
-            The factors by which interaction energies in each of the copies in
-            the stacked system are to be scaled.
+            For each instance, the factor by which its interaction energy should
+            be scaled.
 
         Returns
         -------
-        iterable(openmm.openmm.Force)
-            A collection of forces to be added to the stacked system to
-            replicate the behavior of the given force being applied to each of
-            the non-interacting copies within the stacked system.
+        iterable of openmm.openmm.Force
+            A collection of forces to be added to the combined system to
+            replicate the behavior of the given forces being applied to the
+            specified instances.
 
         Notes
         -----
-        This method must be implemented in derived classes.  The forces returned
-        need not be of the same type as the given force.  If multiple forces are
-        unnecessary, an iterable yielding a single force should be returned.
+        This method must be implemented in derived classes.  The forces created
+        need not be of the same types as the given forces.  If multiple forces
+        are not needed, an iterable yielding a single force should be returned.
+        Implementations need not set the force group or name of any of the
+        forces yielded as these will be set automatically.
         """
 
         raise NotImplementedError
@@ -416,30 +531,42 @@ class HarmonicBondForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.HarmonicBondForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        bond_count = force.getNumBonds()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve bond parameters for all forces.
+        bond_parameters = [
+            [
+                [force.getBondParameters(bond_index) for bond_index in range(force.getNumBonds())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
+        
+        # Split forces into classes based on whether or not they use periodic
+        # boundary conditions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault(force.usesPeriodicBoundaryConditions(), {}).setdefault(template_index, []).append(force_index)
 
-        bond_parameters = [force.getBondParameters(bond_index) for bond_index in range(bond_count)]
+        for uses_pbc, class_forces in force_classes.items():
+            combined_force = openmm.HarmonicBondForce()
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-        stacked_force = openmm.HarmonicBondForce()
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2,
+                            length, k,
+                        ) in bond_parameters[template_index][force_index]:
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+                        combined_force.addBond(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            length,
+                            energy_scale * k,
+                        )
 
-            for (
-                    particle_index_1, particle_index_2,
-                    length, k,
-                ) in bond_parameters:
-
-                stacked_force.addBond(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    length,
-                    energy_scale * k,
-                )
-
-        yield stacked_force
+            yield combined_force
 
 class HarmonicAngleForceHandler(ForceHandler):
     __slots__ = ()
@@ -448,31 +575,43 @@ class HarmonicAngleForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.HarmonicAngleForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        angle_count = force.getNumAngles()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve angle parameters for all forces.
+        angle_parameters = [
+            [
+                [force.getAngleParameters(angle_index) for angle_index in range(force.getNumAngles())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
+        
+        # Split forces into classes based on whether or not they use periodic
+        # boundary conditions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault(force.usesPeriodicBoundaryConditions(), {}).setdefault(template_index, []).append(force_index)
 
-        angle_parameters = [force.getAngleParameters(angle_index) for angle_index in range(angle_count)]
+        for uses_pbc, class_forces in force_classes.items():
+            combined_force = openmm.HarmonicAngleForce()
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-        stacked_force = openmm.HarmonicAngleForce()
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2, particle_index_3,
+                            angle, k,
+                        ) in angle_parameters[template_index][force_index]:
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+                        combined_force.addAngle(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            particle_index_3 + particle_offset,
+                            angle,
+                            energy_scale * k,
+                        )
 
-            for (
-                    particle_index_1, particle_index_2, particle_index_3,
-                    angle, k,
-                ) in angle_parameters:
-
-                stacked_force.addAngle(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    particle_index_3 + particle_offset,
-                    angle,
-                    energy_scale * k,
-                )
-
-        yield stacked_force
+            yield combined_force
 
 class PeriodicTorsionForceHandler(ForceHandler):
     __slots__ = ()
@@ -481,33 +620,45 @@ class PeriodicTorsionForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.PeriodicTorsionForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        torsion_count = force.getNumTorsions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve torsion parameters for all forces.
+        torsion_parameters = [
+            [
+                [force.getTorsionParameters(torsion_index) for torsion_index in range(force.getNumTorsions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        torsion_parameters = [force.getTorsionParameters(torsion_index) for torsion_index in range(torsion_count)]
+        # Split forces into classes based on whether or not they use periodic
+        # boundary conditions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault(force.usesPeriodicBoundaryConditions(), {}).setdefault(template_index, []).append(force_index)
 
-        stacked_force = openmm.PeriodicTorsionForce()
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        for uses_pbc, class_forces in force_classes.items():
+            combined_force = openmm.PeriodicTorsionForce()
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2, particle_index_3, particle_index_4,
+                            periodicity, phase, k,
+                        ) in torsion_parameters[template_index][force_index]:
 
-            for (
-                    particle_index_1, particle_index_2, particle_index_3, particle_index_4,
-                    periodicity, phase, k,
-                ) in torsion_parameters:
+                        combined_force.addTorsion(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            particle_index_3 + particle_offset,
+                            particle_index_4 + particle_offset,
+                            periodicity,
+                            phase,
+                            energy_scale * k,
+                        )
 
-                stacked_force.addTorsion(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    particle_index_3 + particle_offset,
-                    particle_index_4 + particle_offset,
-                    periodicity,
-                    phase,
-                    energy_scale * k,
-                )
-
-        yield stacked_force
+            yield combined_force
 
 class RBTorsionForceHandler(ForceHandler):
     __slots__ = ()
@@ -516,36 +667,48 @@ class RBTorsionForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.RBTorsionForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        torsion_count = force.getNumTorsions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve torsion parameters for all forces.
+        torsion_parameters = [
+            [
+                [force.getTorsionParameters(torsion_index) for torsion_index in range(force.getNumTorsions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        torsion_parameters = [force.getTorsionParameters(torsion_index) for torsion_index in range(torsion_count)]
+        # Split forces into classes based on whether or not they use periodic
+        # boundary conditions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault(force.usesPeriodicBoundaryConditions(), {}).setdefault(template_index, []).append(force_index)
 
-        stacked_force = openmm.RBTorsionForce()
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        for uses_pbc, class_forces in force_classes.items():
+            combined_force = openmm.RBTorsionForce()
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2, particle_index_3, particle_index_4,
+                            c_0, c_1, c_2, c_3, c_4, c_5,
+                        ) in torsion_parameters[template_index][force_index]:
 
-            for (
-                    particle_index_1, particle_index_2, particle_index_3, particle_index_4,
-                    c_0, c_1, c_2, c_3, c_4, c_5,
-                ) in torsion_parameters:
+                        combined_force.addTorsion(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            particle_index_3 + particle_offset,
+                            particle_index_4 + particle_offset,
+                            energy_scale * c_0,
+                            energy_scale * c_1,
+                            energy_scale * c_2,
+                            energy_scale * c_3,
+                            energy_scale * c_4,
+                            energy_scale * c_5,
+                        )
 
-                stacked_force.addTorsion(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    particle_index_3 + particle_offset,
-                    particle_index_4 + particle_offset,
-                    energy_scale * c_0,
-                    energy_scale * c_1,
-                    energy_scale * c_2,
-                    energy_scale * c_3,
-                    energy_scale * c_4,
-                    energy_scale * c_5,
-                )
-
-        yield stacked_force
+            yield combined_force
 
 class CMAPTorsionForceHandler(ForceHandler):
     __slots__ = ()
@@ -554,42 +717,102 @@ class CMAPTorsionForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CMAPTorsionForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        map_count = force.getNumMaps()
-        torsion_count = force.getNumTorsions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve CMAP map parameters for all forces.
+        map_parameters = [
+            [
+                [force.getMapParameters(map_index) for map_index in range(force.getNumMaps())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        map_parameters = [force.getMapParameters(map_index) for map_index in range(map_count)]
-        torsion_parameters = [force.getTorsionParameters(torsion_index) for torsion_index in range(torsion_count)]
+        # Retrieve torsion parameters for all forces.
+        torsion_parameters = [
+            [
+                [force.getTorsionParameters(torsion_index) for torsion_index in range(force.getNumTorsions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force = openmm.CMAPTorsionForce()
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Split forces into classes based on whether or not they use periodic
+        # boundary conditions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault(force.usesPeriodicBoundaryConditions(), {}).setdefault(template_index, []).append(force_index)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            map_offset = copy_index * map_count
-            particle_offset = copy_index * particle_count
+        for uses_pbc, class_forces in force_classes.items():
+            combined_force = openmm.CMAPTorsionForce()
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-            for size, energy in map_parameters:
-                stacked_force.addMap(size, [energy_scale * energy_ij for energy_ij in energy])
+            # Keep track of the indices in the combined force of all of the maps
+            # added so far, first directly by the (scaled) map parameters
+            # themselves, and then by the indices and scale needed to look up
+            # the map parameters in the map parameter table and scale them.
+            map_parameters_table = {}
+            map_indices_table = {}
 
-            for (
-                    map_index,
-                    particle_index_a_1, particle_index_a_2, particle_index_a_3, particle_index_a_4,
-                    particle_index_b_1, particle_index_b_2, particle_index_b_3, particle_index_b_4,
-                ) in torsion_parameters:
+            def get_map_index_by_indices(template_index, force_index, map_index, energy_scale):
+                # Retrieves the index of a map in the combined force given
+                # indices needed to look up a map in one of the template forces
+                # and a factor by which its energy parameters should be scaled.
 
-                stacked_force.addTorsion(
-                    map_index + map_offset,
-                    particle_index_a_1 + particle_offset,
-                    particle_index_a_2 + particle_offset,
-                    particle_index_a_3 + particle_offset,
-                    particle_index_a_4 + particle_offset,
-                    particle_index_b_1 + particle_offset,
-                    particle_index_b_2 + particle_offset,
-                    particle_index_b_3 + particle_offset,
-                    particle_index_b_4 + particle_offset,
-                )
+                map_indices_key = (template_index, force_index, map_index, energy_scale)
+                map_indices_value = map_indices_table.get(map_indices_key, None)
 
-        yield stacked_force
+                if map_indices_value is None:
+                    # If a map has not already been found to be available in the
+                    # combined force for these indices and scale, create one or
+                    # look up a suitable existing one, store its index, and
+                    # return this index.
+                    map_indices_table[map_indices_key] = map_indices_value = get_map_index_by_parameters(*map_indices_key)
+
+                return map_indices_value
+
+            def get_map_index_by_parameters(template_index, force_index, map_index, energy_scale):
+                # Retrieves the index of a map in the combined force given
+                # indices needed to look up a map in one of the template forces
+                # and a factor by which its energy parameters should be scaled.
+                # If this function is called, no index exists for the given
+                # indices and scale in the table of map indices by indices and
+                # scale, but an index may exist in the table by parameters.
+
+                size, energy = map_parameters[template_index][force_index][map_index]
+                map_parameters_key = (size, tuple(energy_scale * energy_ij for energy_ij in energy.value_in_unit_system(openmm.unit.md_unit_system)))
+                map_parameters_value = map_parameters_table.get(map_parameters_key, None)
+
+                if map_parameters_value is None:
+                    # If a map has not already been created in the combined
+                    # force with these parameters, create one, store its index,
+                    # and return this index.
+                    map_parameters_table[map_parameters_key] = map_parameters_value = combined_force.getNumMaps()
+                    combined_force.addMap(*map_parameters_key)
+
+                return map_parameters_value
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            map_index,
+                            particle_index_a_1, particle_index_a_2, particle_index_a_3, particle_index_a_4,
+                            particle_index_b_1, particle_index_b_2, particle_index_b_3, particle_index_b_4,
+                        ) in torsion_parameters[template_index][force_index]:
+
+                        combined_force.addTorsion(
+                            get_map_index_by_indices(template_index, force_index, map_index, energy_scale),
+                            particle_index_a_1 + particle_offset,
+                            particle_index_a_2 + particle_offset,
+                            particle_index_a_3 + particle_offset,
+                            particle_index_a_4 + particle_offset,
+                            particle_index_b_1 + particle_offset,
+                            particle_index_b_2 + particle_offset,
+                            particle_index_b_3 + particle_offset,
+                            particle_index_b_4 + particle_offset,
+                        )
+
+            yield combined_force
 
 class CustomExternalForceHandler(ForceHandler):
     __slots__ = ()
@@ -598,38 +821,81 @@ class CustomExternalForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomExternalForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        term_count = force.getNumParticles()
-        term_parameter_count = force.getNumPerParticleParameters()
-        global_parameter_count = force.getNumGlobalParameters()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        term_parameters = [force.getParticleParameters(term_index) for term_index in range(term_count)]
-        term_parameter_names = [force.getPerParticleParameterName(term_parameter_index) for term_parameter_index in range(term_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, term_parameter_names + global_parameter_names)
-        stacked_force = openmm.CustomExternalForce(_scale_function(energy_function, scale_name))
+        # Retrieve term parameter names for all forces.
+        term_parameter_names = [
+            [
+                [force.getPerParticleParameterName(term_parameter_index) for term_parameter_index in range(force.getNumPerParticleParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerParticleParameter(scale_name)
-        for term_parameter_name in term_parameter_names:
-            stacked_force.addPerParticleParameter(term_parameter_name)
+        # Retrieve term parameters for all forces.
+        term_parameters = [
+            [
+                [force.getParticleParameters(term_index) for term_index in range(force.getNumParticles())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Split forces into classes based on their energy functions, global
+        # parameter names, global parameter values, and term parameter names.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getEnergyFunction(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(term_parameter_names[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        for (
+                energy_function,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_term_parameter_names,
+            ), class_forces in force_classes.items():
 
-            for particle_index, term_parameter_values in term_parameters:
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_term_parameter_names
+            )
+            combined_force = openmm.CustomExternalForce(_scale_function(energy_function, scale_name))
 
-                stacked_force.addParticle(
-                    particle_index + particle_offset,
-                    [energy_scale, *term_parameter_values],
-                )
-        
-        yield stacked_force
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+
+            combined_force.addPerParticleParameter(scale_name)
+            for term_parameter_name in class_term_parameter_names:
+                combined_force.addPerParticleParameter(term_parameter_name)
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for particle_index, term_parameter_values in term_parameters[template_index][force_index]:
+                        combined_force.addParticle(particle_index + particle_offset, [energy_scale, *term_parameter_values])
+
+            yield combined_force
 
 class CustomBondForceHandler(ForceHandler):
     __slots__ = ()
@@ -638,48 +904,108 @@ class CustomBondForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomBondForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        bond_count = force.getNumBonds()
-        bond_parameter_count = force.getNumPerBondParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        bond_parameters = [force.getBondParameters(bond_index) for bond_index in range(bond_count)]
-        bond_parameter_names = [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(bond_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, bond_parameter_names + global_parameter_names + derivative_names)
-        stacked_force = openmm.CustomBondForce(_scale_function(energy_function, scale_name))
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Retrieve bond parameter names for all forces.
+        bond_parameter_names = [
+            [
+                [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(force.getNumPerBondParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerBondParameter(scale_name)
-        for bond_parameter_name in bond_parameter_names:
-            stacked_force.addPerBondParameter(bond_parameter_name)
+        # Retrieve bond parameters for all forces.
+        bond_parameters = [
+            [
+                [force.getBondParameters(bond_index) for bond_index in range(force.getNumBonds())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
+        # Split forces into classes based on their energy functions, whether or
+        # not they use periodic boundary conditions, global parameter names,
+        # global parameter values, bond parameter names, and derivative names.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getEnergyFunction(),
+                    force.usesPeriodicBoundaryConditions(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(bond_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        for (
+                energy_function,
+                uses_pbc,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_bond_parameter_names,
+                class_derivative_names,
+            ), class_forces in force_classes.items():
 
-            for (
-                    particle_index_1, particle_index_2,
-                    bond_parameter_values,
-                ) in bond_parameters:
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_bond_parameter_names
+                    + class_derivative_names
+            )
+            combined_force = openmm.CustomBondForce(_scale_function(energy_function, scale_name))
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-                stacked_force.addBond(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    [energy_scale, *bond_parameter_values],
-                )
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
 
-        yield stacked_force
+            combined_force.addPerBondParameter(scale_name)
+            for bond_parameter_name in class_bond_parameter_names:
+                combined_force.addPerBondParameter(bond_parameter_name)
+
+            for derivative_name in class_derivative_names:
+                combined_force.addEnergyParameterDerivative(derivative_name)
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2,
+                            bond_parameter_values,
+                        ) in bond_parameters[template_index][force_index]:
+
+                        combined_force.addBond(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            [energy_scale, *bond_parameter_values],
+                        )
+
+            yield combined_force
 
 class CustomAngleForceHandler(ForceHandler):
     __slots__ = ()
@@ -688,49 +1014,109 @@ class CustomAngleForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomAngleForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        angle_count = force.getNumAngles()
-        angle_parameter_count = force.getNumPerAngleParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        angle_parameters = [force.getAngleParameters(angle_index) for angle_index in range(angle_count)]
-        angle_parameter_names = [force.getPerAngleParameterName(angle_parameter_index) for angle_parameter_index in range(angle_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, angle_parameter_names + global_parameter_names + derivative_names)
-        stacked_force = openmm.CustomAngleForce(_scale_function(energy_function, scale_name))
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Retrieve angle parameter names for all forces.
+        angle_parameter_names = [
+            [
+                [force.getPerAngleParameterName(angle_parameter_index) for angle_parameter_index in range(force.getNumPerAngleParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerAngleParameter(scale_name)
-        for angle_parameter_name in angle_parameter_names:
-            stacked_force.addPerAngleParameter(angle_parameter_name)
+        # Retrieve angle parameters for all forces.
+        angle_parameters = [
+            [
+                [force.getAngleParameters(angle_index) for angle_index in range(force.getNumAngles())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
+        # Split forces into classes based on their energy functions, whether or
+        # not they use periodic boundary conditions, global parameter names,
+        # global parameter values, angle parameter names, and derivative names.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getEnergyFunction(),
+                    force.usesPeriodicBoundaryConditions(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(angle_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        for (
+                energy_function,
+                uses_pbc,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_angle_parameter_names,
+                class_derivative_names,
+            ), class_forces in force_classes.items():
 
-            for (
-                    particle_index_1, particle_index_2, particle_index_3,
-                    angle_parameter_values,
-                ) in angle_parameters:
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_angle_parameter_names
+                    + class_derivative_names
+            )
+            combined_force = openmm.CustomAngleForce(_scale_function(energy_function, scale_name))
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-                stacked_force.addAngle(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    particle_index_3 + particle_offset,
-                    [energy_scale, *angle_parameter_values],
-                )
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
 
-        yield stacked_force
+            combined_force.addPerAngleParameter(scale_name)
+            for angle_parameter_name in class_angle_parameter_names:
+                combined_force.addPerAngleParameter(angle_parameter_name)
+
+            for derivative_name in class_derivative_names:
+                combined_force.addEnergyParameterDerivative(derivative_name)
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2, particle_index_3,
+                            angle_parameter_values,
+                        ) in angle_parameters[template_index][force_index]:
+
+                        combined_force.addAngle(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            particle_index_3 + particle_offset,
+                            [energy_scale, *angle_parameter_values],
+                        )
+
+            yield combined_force
 
 class CustomTorsionForceHandler(ForceHandler):
     __slots__ = ()
@@ -739,50 +1125,111 @@ class CustomTorsionForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomTorsionForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        torsion_count = force.getNumTorsions()
-        torsion_parameter_count = force.getNumPerTorsionParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        torsion_parameters = [force.getTorsionParameters(torsion_index) for torsion_index in range(torsion_count)]
-        torsion_parameter_names = [force.getPerTorsionParameterName(torsion_parameter_index) for torsion_parameter_index in range(torsion_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, torsion_parameter_names + global_parameter_names + derivative_names)
-        stacked_force = openmm.CustomTorsionForce(_scale_function(energy_function, scale_name))
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Retrieve torsion parameter names for all forces.
+        torsion_parameter_names = [
+            [
+                [force.getPerTorsionParameterName(torsion_parameter_index) for torsion_parameter_index in range(force.getNumPerTorsionParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerTorsionParameter(scale_name)
-        for torsion_parameter_name in torsion_parameter_names:
-            stacked_force.addPerTorsionParameter(torsion_parameter_name)
+        # Retrieve torsion parameters for all forces.
+        torsion_parameters = [
+            [
+                [force.getTorsionParameters(torsion_index) for torsion_index in range(force.getNumTorsions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
+        # Split forces into classes based on their energy functions, whether or
+        # not they use periodic boundary conditions, global parameter names,
+        # global parameter values, torsion parameter names, and derivative
+        # names.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getEnergyFunction(),
+                    force.usesPeriodicBoundaryConditions(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(torsion_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        for (
+                energy_function,
+                uses_pbc,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_torsion_parameter_names,
+                class_derivative_names,
+            ), class_forces in force_classes.items():
 
-            for (
-                    particle_index_1, particle_index_2, particle_index_3, particle_index_4,
-                    torsion_parameter_values,
-                ) in torsion_parameters:
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_torsion_parameter_names
+                    + class_derivative_names
+            )
+            combined_force = openmm.CustomTorsionForce(_scale_function(energy_function, scale_name))
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-                stacked_force.addTorsion(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                    particle_index_3 + particle_offset,
-                    particle_index_4 + particle_offset,
-                    [energy_scale, *torsion_parameter_values],
-                )
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
 
-        yield stacked_force
+            combined_force.addPerTorsionParameter(scale_name)
+            for torsion_parameter_name in class_torsion_parameter_names:
+                combined_force.addPerTorsionParameter(torsion_parameter_name)
+
+            for derivative_name in class_derivative_names:
+                combined_force.addEnergyParameterDerivative(derivative_name)
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for (
+                            particle_index_1, particle_index_2, particle_index_3, particle_index_4,
+                            torsion_parameter_values,
+                        ) in torsion_parameters[template_index][force_index]:
+
+                        combined_force.addTorsion(
+                            particle_index_1 + particle_offset,
+                            particle_index_2 + particle_offset,
+                            particle_index_3 + particle_offset,
+                            particle_index_4 + particle_offset,
+                            [energy_scale, *torsion_parameter_values],
+                        )
+
+            yield combined_force
 
 class CustomCompoundBondForceHandler(ForceHandler):
     __slots__ = ()
@@ -791,50 +1238,133 @@ class CustomCompoundBondForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomCompoundBondForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        bond_count = force.getNumBonds()
-        bond_parameter_count = force.getNumPerBondParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
-        function_count = force.getNumTabulatedFunctions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        bond_parameters = [force.getBondParameters(bond_index) for bond_index in range(bond_count)]
-        bond_parameter_names = [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(bond_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
-        function_names = [force.getTabulatedFunctionName(function_index) for function_index in range(function_count)]
-        functions = [force.getTabulatedFunction(function_index) for function_index in range(function_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, bond_parameter_names + global_parameter_names + derivative_names + function_names)
-        stacked_force = openmm.CustomCompoundBondForce(force.getNumParticlesPerBond(), _scale_function(energy_function, scale_name))
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Retrieve bond parameter names for all forces.
+        bond_parameter_names = [
+            [
+                [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(force.getNumPerBondParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerBondParameter(scale_name)
-        for bond_parameter_name in bond_parameter_names:
-            stacked_force.addPerBondParameter(bond_parameter_name)
+        # Retrieve bond parameters for all forces.
+        bond_parameters = [
+            [
+                [force.getBondParameters(bond_index) for bond_index in range(force.getNumBonds())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
-        
-        for function_name, function in zip(function_names, functions):
-            stacked_force.addTabulatedFunction(function_name, openmm.XmlSerializer.clone(function))
+        # Retrieve tabulated function names for all forces.
+        function_names = [
+            [
+                [force.getTabulatedFunctionName(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        # Retrieve tabulated functions for all forces.
+        functions = [
+            [
+                [force.getTabulatedFunction(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-            for particle_indices, bond_parameter_values in bond_parameters:
+        # Split forces into classes based on the number of particles per bond
+        # that they use, their energy functions, whether or not they use
+        # periodic boundary conditions, global parameter names, global parameter
+        # values, bond parameter names, derivative names, tabulated function
+        # names, and tabulated functions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getNumParticlesPerBond(),
+                    force.getEnergyFunction(),
+                    force.usesPeriodicBoundaryConditions(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(bond_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                    tuple(function_names[template_index][force_index]),
+                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-                stacked_force.addBond(
-                    [particle_index + particle_offset for particle_index in particle_indices],
-                    [energy_scale, *bond_parameter_values],
-                )
+        for (
+                particles_per_bond,
+                energy_function,
+                uses_pbc,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_bond_parameter_names,
+                class_derivative_names,
+                class_function_names,
+                class_functions,
+            ), class_forces in force_classes.items():
 
-        yield stacked_force
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_bond_parameter_names
+                    + class_derivative_names
+                    + class_function_names
+            )
+            combined_force = openmm.CustomCompoundBondForce(particles_per_bond, _scale_function(energy_function, scale_name))
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
+
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+
+            combined_force.addPerBondParameter(scale_name)
+            for bond_parameter_name in class_bond_parameter_names:
+                combined_force.addPerBondParameter(bond_parameter_name)
+
+            for derivative_name in class_derivative_names:
+                combined_force.addEnergyParameterDerivative(derivative_name)
+
+            for function_name, function in zip(class_function_names, class_functions):
+                combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    for particle_indices, bond_parameter_values in bond_parameters[template_index][force_index]:
+                        combined_force.addBond(
+                            [particle_index + particle_offset for particle_index in particle_indices],
+                            [energy_scale, *bond_parameter_values],
+                        )
+
+            yield combined_force
 
 class CustomCentroidBondForceHandler(ForceHandler):
     __slots__ = ()
@@ -843,62 +1373,150 @@ class CustomCentroidBondForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomCentroidBondForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        group_count = force.getNumGroups()
-        bond_count = force.getNumBonds()
-        bond_parameter_count = force.getNumPerBondParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
-        function_count = force.getNumTabulatedFunctions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        group_parameters = [force.getGroupParameters(group_index) for group_index in range(group_count)]
-        bond_parameters = [force.getBondParameters(bond_index) for bond_index in range(bond_count)]
-        bond_parameter_names = [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(bond_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
-        function_names = [force.getTabulatedFunctionName(function_index) for function_index in range(function_count)]
-        functions = [force.getTabulatedFunction(function_index) for function_index in range(function_count)]
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, bond_parameter_names + global_parameter_names + derivative_names + function_names)
-        stacked_force = openmm.CustomCentroidBondForce(force.getNumGroupsPerBond(), _scale_function(energy_function, scale_name))
-        stacked_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
+        # Retrieve bond parameter names for all forces.
+        bond_parameter_names = [
+            [
+                [force.getPerBondParameterName(bond_parameter_index) for bond_parameter_index in range(force.getNumPerBondParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerBondParameter(scale_name)
-        for bond_parameter_name in bond_parameter_names:
-            stacked_force.addPerBondParameter(bond_parameter_name)
+        # Retrieve group parameters for all forces.
+        group_parameters = [
+            [
+                [force.getGroupParameters(group_index) for group_index in range(force.getNumGroups())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve bond parameters for all forces.
+        bond_parameters = [
+            [
+                [force.getBondParameters(bond_index) for bond_index in range(force.getNumBonds())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
-        
-        for function_name, function in zip(function_names, functions):
-            stacked_force.addTabulatedFunction(function_name, openmm.XmlSerializer.clone(function))
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+        # Retrieve tabulated function names for all forces.
+        function_names = [
+            [
+                [force.getTabulatedFunctionName(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-            for particle_indices, weights in group_parameters:
-                
-                stacked_force.addGroup(
-                    [particle_index + particle_offset for particle_index in particle_indices],
-                    weights,
-                )
+        # Retrieve tabulated functions for all forces.
+        functions = [
+            [
+                [force.getTabulatedFunction(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            group_offset = copy_index * group_count
+        # Split forces into classes based on the number of groups per bond that
+        # they use, their energy functions, whether or not they use periodic
+        # boundary conditions, global parameter names, global parameter values,
+        # bond parameter names, derivative names, tabulated function names, and
+        # tabulated functions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getNumGroupsPerBond(),
+                    force.getEnergyFunction(),
+                    force.usesPeriodicBoundaryConditions(),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(bond_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                    tuple(function_names[template_index][force_index]),
+                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
 
-            for group_indices, bond_parameter_values in bond_parameters:
+        for (
+                groups_per_bond,
+                energy_function,
+                uses_pbc,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_bond_parameter_names,
+                class_derivative_names,
+                class_function_names,
+                class_functions,
+            ), class_forces in force_classes.items():
 
-                stacked_force.addBond(
-                    [group_index + group_offset for group_index in group_indices],
-                    [energy_scale, *bond_parameter_values],
-                )
+            scale_name = _get_scale_name(energy_function,
+                class_global_parameter_names
+                    + class_bond_parameter_names
+                    + class_derivative_names
+                    + class_function_names
+            )
+            combined_force = openmm.CustomCentroidBondForce(groups_per_bond, _scale_function(energy_function, scale_name))
+            combined_force.setUsesPeriodicBoundaryConditions(uses_pbc)
 
-        yield stacked_force
+            for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+
+            combined_force.addPerBondParameter(scale_name)
+            for bond_parameter_name in class_bond_parameter_names:
+                combined_force.addPerBondParameter(bond_parameter_name)
+
+            for derivative_name in class_derivative_names:
+                combined_force.addEnergyParameterDerivative(derivative_name)
+
+            for function_name, function in zip(class_function_names, class_functions):
+                combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+
+            for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
+                for force_index in class_forces.get(template_index, []):
+                    group_offset = combined_force.getNumGroups()
+
+                    for particle_indices, weights in group_parameters[template_index][force_index]:
+                        combined_force.addGroup(
+                            [particle_index + particle_offset for particle_index in particle_indices],
+                            weights,
+                        )
+
+                    for group_indices, bond_parameter_values in bond_parameters[template_index][force_index]:
+                        combined_force.addBond(
+                            [group_index + group_offset for group_index in group_indices],
+                            [energy_scale, *bond_parameter_values],
+                        )
+
+            yield combined_force
 
 class CustomNonbondedForceHandler(ForceHandler):
     __slots__ = ()
@@ -907,85 +1525,213 @@ class CustomNonbondedForceHandler(ForceHandler):
     def handled_types(self):
         return (openmm.CustomNonbondedForce,)
 
-    def _handle(self, force, particle_count, energy_scales):
-        exclusion_count = force.getNumExclusions()
-        group_count = force.getNumInteractionGroups()
-        compute_count = force.getNumComputedValues()
-        particle_parameter_count = force.getNumPerParticleParameters()
-        global_parameter_count = force.getNumGlobalParameters()
-        derivative_count = force.getNumEnergyParameterDerivatives()
-        function_count = force.getNumTabulatedFunctions()
+    def handle(self, force_table, template_indices, particle_offsets, energy_scales):
+        # Retrieve computed value parameters for all forces.
+        compute_parameters = [
+            [
+                [tuple(force.getComputedValueParameters(compute_index)) for compute_index in range(force.getNumComputedValues())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        exclusion_parameters = [force.getExclusionParticles(exclusion_index) for exclusion_index in range(exclusion_count)]
-        group_parameters = [force.getInteractionGroupParameters(group_index) for group_index in range(group_count)]
-        compute_parameters = [force.getComputedValueParameters(compute_index) for compute_index in range(compute_count)]
-        particle_parameters = [force.getParticleParameters(particle_index) for particle_index in range(particle_count)]
-        particle_parameter_names = [force.getPerParticleParameterName(particle_parameter_index) for particle_parameter_index in range(particle_parameter_count)]
-        global_parameter_names = [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        global_parameter_values = [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(global_parameter_count)]
-        derivative_names = [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(derivative_count)]
-        function_names = [force.getTabulatedFunctionName(function_index) for function_index in range(function_count)]
-        functions = [force.getTabulatedFunction(function_index) for function_index in range(function_count)]
+        # Retrieve global parameter names for all forces.
+        global_parameter_names = [
+            [
+                [force.getGlobalParameterName(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        # If no interaction groups are present, add one containing all
-        # particles.  This will give the same behavior if a single copy of the
-        # system is being made, and will ensure that multiple copies will not
-        # interact with each other even if interaction groups are initially
-        # absent.
-        if not group_count:
-            group_count = 1
-            group_parameters.append([tuple(range(particle_count))] * 2)
+        # Retrieve global parameter values for all forces.
+        global_parameter_values = [
+            [
+                [force.getGlobalParameterDefaultValue(global_parameter_index) for global_parameter_index in range(force.getNumGlobalParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        # In the energy function, retrieve the energy scale from the first of
-        # the two particles in an interacting pair.  Since only particles from
-        # the same copies of the system will ever interact, the energy scale
-        # should have the same value for both particles in any interacting pair.
-        energy_function = force.getEnergyFunction()
-        scale_name = _get_scale_name(energy_function, [compute_name for compute_name, compute in compute_parameters] + particle_parameter_names + global_parameter_names + derivative_names + function_names)
-        stacked_force = openmm.CustomNonbondedForce(_scale_function(energy_function, f"{scale_name}1"))
-        stacked_force.setNonbondedMethod(force.getNonbondedMethod())
-        stacked_force.setUseSwitchingFunction(force.getUseSwitchingFunction())
-        stacked_force.setUseLongRangeCorrection(force.getUseLongRangeCorrection())
-        stacked_force.setCutoffDistance(force.getCutoffDistance())
-        stacked_force.setSwitchingDistance(force.getSwitchingDistance())
+        # Retrieve particle parameter names for all forces.
+        particle_parameter_names = [
+            [
+                [force.getPerParticleParameterName(particle_parameter_index) for particle_parameter_index in range(force.getNumPerParticleParameters())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for compute_name, compute in compute_parameters:
-            stacked_force.addComputedValue(compute_name, compute)
+        # Retrieve particle parameters for all forces.
+        particle_parameters = [
+            [
+                [force.getParticleParameters(particle_index) for particle_index in range(force.getNumParticles())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        stacked_force.addPerParticleParameter(scale_name)
-        for particle_parameter_name in particle_parameter_names:
-            stacked_force.addPerParticleParameter(particle_parameter_name)
+        # Retrieve interaction group parameters for all forces.
+        group_parameters = [
+            [
+                # If interaction groups are present, retrieve them.  If no
+                # interaction groups are present, add a single interaction group
+                # containing all particles (this will not change the effective
+                # behavior of the force).  In this way, the interaction group
+                # list for a force can always be consulted to determine the
+                # particle pairs that should be interacting.
+                [force.getInteractionGroupParameters(group_index) for group_index in range(force.getNumInteractionGroups())]
+                if force.getNumInteractionGroups() else [tuple(range(force.getNumParticles()))] * 2
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for global_parameter_name, global_parameter_value in zip(global_parameter_names, global_parameter_values):
-            stacked_force.addGlobalParameter(global_parameter_name, global_parameter_value)
+        # Retrieve exclusion parameters for all forces.
+        exclusion_parameters = [
+            [
+                [force.getExclusionParticles(exclusion_index) for exclusion_index in range(force.getNumExclusions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
 
-        for derivative_name in derivative_names:
-            stacked_force.addEnergyParameterDerivative(derivative_name)
+        # Retrieve derivative names for all forces.
+        derivative_names = [
+            [
+                [force.getEnergyParameterDerivativeName(derivative_index) for derivative_index in range(force.getNumEnergyParameterDerivatives())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
+
+        # Retrieve tabulated function names for all forces.
+        function_names = [
+            [
+                [force.getTabulatedFunctionName(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
+
+        # Retrieve tabulated functions for all forces.
+        functions = [
+            [
+                [force.getTabulatedFunction(function_index) for function_index in range(force.getNumTabulatedFunctions())]
+                for force in template_forces
+            ]
+            for template_forces in force_table
+        ]
+
+        # Split forces into classes based on their energy functions, nonbonded
+        # methods, whether or not they use switching, whether or not they use
+        # long-range correction, cutoff distances, switching distances, computed
+        # value parameters, global parameter names, global parameter values,
+        # particle parameter names, derivative names, tabulated function names,
+        # and tabulated functions.
+        force_classes = {}
+        for template_index, template_forces in enumerate(force_table):
+            for force_index, force in enumerate(template_forces):
+                force_classes.setdefault((
+                    force.getEnergyFunction(),
+                    force.getNonbondedMethod(),
+                    force.getUseSwitchingFunction(),
+                    force.getUseLongRangeCorrection(),
+                    force.getCutoffDistance().value_in_unit_system(openmm.unit.md_unit_system),
+                    force.getSwitchingDistance().value_in_unit_system(openmm.unit.md_unit_system),
+                    tuple(compute_parameters[template_index][force_index]),
+                    tuple(global_parameter_names[template_index][force_index]),
+                    tuple(global_parameter_values[template_index][force_index]),
+                    tuple(particle_parameter_names[template_index][force_index]),
+                    tuple(derivative_names[template_index][force_index]),
+                    tuple(function_names[template_index][force_index]),
+                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                ), {}).setdefault(template_index, []).append(force_index)
         
-        for function_name, function in zip(function_names, functions):
-            stacked_force.addTabulatedFunction(function_name, openmm.XmlSerializer.clone(function))
+        for (
+                energy_function,
+                nonbonded_method,
+                uses_switch,
+                uses_long_range,
+                cut_distance,
+                switch_distance,
+                class_compute_parameters,
+                class_global_parameter_names,
+                class_global_parameter_values,
+                class_particle_parameter_names,
+                class_derivative_names,
+                class_function_names,
+                class_functions,
+            ), class_forces in force_classes.items():
 
-        for copy_index, energy_scale in enumerate(energy_scales):
-            particle_offset = copy_index * particle_count
+            scale_name = _get_scale_name(energy_function,
+                tuple(compute_name for compute_name, compute in class_compute_parameters)
+                    + class_global_parameter_names
+                    + class_particle_parameter_names
+                    + class_derivative_names
+                    + class_function_names
+            )
 
-            for particle_parameter_values in particle_parameters:
-                stacked_force.addParticle([energy_scale, *particle_parameter_values])
+            # If multiple forces of this class are present in one or more
+            # templates, multiple forces will need to be added to the combined
+            # system to handle differing particle parameter values and
+            # exclusions in general.
+            for force_index in range(max(map(len, class_forces.values()), default=0)):
+                combined_force = openmm.CustomNonbondedForce(_scale_function(energy_function, f"{scale_name}1"))
+                combined_force.setNonbondedMethod(nonbonded_method)
+                combined_force.setUseSwitchingFunction(uses_switch)
+                combined_force.setUseLongRangeCorrection(uses_long_range)
+                combined_force.setCutoffDistance(cut_distance)
+                combined_force.setSwitchingDistance(switch_distance)
 
-            for particle_index_1, particle_index_2 in exclusion_parameters:
-                stacked_force.addExclusion(
-                    particle_index_1 + particle_offset,
-                    particle_index_2 + particle_offset,
-                )
+                for compute_name, compute in class_compute_parameters:
+                    combined_force.addComputedValue(compute_name, compute)
 
-            for particle_indices_1, particle_indices_2 in group_parameters:
-                stacked_force.addInteractionGroup(
-                    [particle_index_1 + particle_offset for particle_index_1 in particle_indices_1],
-                    [particle_index_2 + particle_offset for particle_index_2 in particle_indices_2],
-                )
+                for global_parameter_name, global_parameter_value in zip(class_global_parameter_names, class_global_parameter_values):
+                    combined_force.addGlobalParameter(global_parameter_name, global_parameter_value)
 
-        yield stacked_force
+                combined_force.addPerParticleParameter(scale_name)
+                for particle_parameter_name in class_particle_parameter_names:
+                    combined_force.addPerParticleParameter(particle_parameter_name)
+
+                for derivative_name in class_derivative_names:
+                    combined_force.addEnergyParameterDerivative(derivative_name)
+
+                for function_name, function in zip(class_function_names, class_functions):
+                    combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+
+                for template_index, particle_offset, next_particle_offset, energy_scale in zip(template_indices, particle_offsets, particle_offsets[1:], energy_scales):
+                    if force_index < len(class_forces.get(template_index, [])):
+                        for particle_parameter_values in particle_parameters[template_index][force_index]:
+                            combined_force.addParticle([energy_scale, *particle_parameter_values])
+
+                        for particle_indices_1, particle_indices_2 in group_parameters[template_index][force_index]:
+                            combined_force.addInteractionGroup(
+                                [particle_index_1 + particle_offset for particle_index_1 in particle_indices_1],
+                                [particle_index_2 + particle_offset for particle_index_2 in particle_indices_2],
+                            )
+
+                        for particle_index_1, particle_index_2 in exclusion_parameters[template_index][force_index]:
+                            combined_force.addExclusion(
+                                particle_index_1 + particle_offset,
+                                particle_index_2 + particle_offset,
+                            )
+
+                    else:
+                        # Add dummy particles to the combined force so that the
+                        # number of particles matches that of the combined
+                        # system.  These particles will not be present in any
+                        # interaction group.
+                        for particle_index in range(next_particle_offset - particle_offset):
+                            combined_force.addParticle([energy_scale] + [0] * len(class_particle_parameter_names))
+                
+                yield combined_force
 
 def _get_scale_name(function, parameter_names, prefix="scale"):
+    # Retrieves an appropriate name for a scale parameter (such that the name
+    # does not appear anywhere as a substring of the given function string and
+    # that it is not equal to the names of any of the given parameters).
+
     parameter_names = set(parameter_names)
     for length in itertools.count():
         for suffix in itertools.product("abcdefghijklmnopqrstuvwxyz", repeat=length):
@@ -994,6 +1740,10 @@ def _get_scale_name(function, parameter_names, prefix="scale"):
                 return name
 
 def _scale_function(function, scale_name):
+    # Returns the given function string scaled by a scale parameter with the
+    # given name (handling function strings with additional definitions
+    # delimited by semicolons after the primary expression).
+
     expression, *definitions = function.split(";")
     return ";".join([f"{scale_name}*({expression})", *definitions])
 

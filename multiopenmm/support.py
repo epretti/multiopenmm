@@ -20,6 +20,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .support import MultiOpenMMError, MultiOpenMMWarning
-from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble
-from .concurrent import Manager
+class MultiOpenMMError(Exception):
+    """
+    Raised when a MultiOpenMM-specific error condition arises.
+    """
+
+class MultiOpenMMWarning(Warning):
+    """
+    Issued when a MultiOpenMM-specific warning condition arises.
+    """
