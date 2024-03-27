@@ -53,10 +53,18 @@ def stack(templates, template_indices, temperature_scales):
 
     Returns
     -------
-    openmm.openmm.System
+    (openmm.openmm.System, array of int)
         An OpenMM system containing multiple non-interacting molecular system
         instances, templated after the specified OpenMM systems, and scaled as
-        specified.
+        specified.  Also, for each instance, the particle index in the combined
+        system corresponding to the first particle in the instance, followed by
+        the total number of particles in the combined system (such that the
+        differences of consecutive offsets give the numbers of particles in each
+        instance).  If the combined system has :math:`M` molecular simulation
+        instances containing :math:`N_1`, :math:`N_2`, :math:`\\ldots`,
+        :math:`N_M` particles in turn, the offsets will be :math:`0`,
+        :math:`N_1`, :math:`N_1+N_2`, :math:`\\ldots`,
+        :math:`\\sum_{i=1}^{M-1}N_i`, :math:`\\sum_{i=1}^MN_i`.
 
     Notes
     -----
@@ -124,7 +132,7 @@ def stack(templates, template_indices, temperature_scales):
     # Keep an additional index giving the total number of particles in the
     # combined system such that the number of particles in each instance can be
     # calculated as the differences of each pair of consecutive offsets.
-    particle_offsets = numpy.concatenate(((0,), numpy.cumsum([particle_counts[template_index] for template_index in template_indices])))
+    particle_offsets = numpy.concatenate(((0,), numpy.cumsum([particle_counts[template_index] for template_index in template_indices], dtype=int)))
 
     combined_system = openmm.System()
 
@@ -159,7 +167,7 @@ def stack(templates, template_indices, temperature_scales):
     for force in DefaultForceProcessor._process(templates, template_indices, particle_offsets, energy_scales):
         combined_system.addForce(force)
 
-    return combined_system
+    return combined_system, particle_offsets
 
 class Processor(abc.ABC):
     # Represents a generic processor that allows handlers for specific types of
@@ -218,8 +226,8 @@ class VirtualSiteProcessor(Processor):
 
         Registers a virtual site handler.  All virtual site types that the
         handler reports as handleable will be mapped to the handler, overriding
-        the mappings of any previous handlers also reporting one or more of the
-        same virtual site types.
+        the mappings of any previously registered handlers also reporting one or
+        more of the same virtual site types.
 
         :type handler: multiopenmm.stack.VirtualSiteHandler
         :param handler: The handler to register.
@@ -390,7 +398,8 @@ class ForceProcessor(Processor):
 
         Registers a force handler.  All force types that the handler reports as
         handleable will be mapped to the handler, overriding the mappings of any
-        previous handlers also reporting one or more of the same force types.
+        previously registered handlers also reporting one or more of the same
+        force types.
 
         :type handler: multiopenmm.stack.ForceHandler
         :param handler: The handler to register.
@@ -501,7 +510,11 @@ class ForceHandler(abc.ABC):
             corresponding to the first particle in the instance, followed by the
             total number of particles in the combined system (such that the
             differences of consecutive offsets give the numbers of particles in
-            each instance).
+            each instance).  If the combined system has :math:`M` molecular
+            simulation instances containing :math:`N_1`, :math:`N_2`,
+            :math:`\\ldots`, :math:`N_M` particles in turn, the offsets will be
+            :math:`0`, :math:`N_1`, :math:`N_1+N_2`, :math:`\\ldots`,
+            :math:`\\sum_{i=1}^{M-1}N_i`, :math:`\\sum_{i=1}^MN_i`.
         energy_scales : array of float
             For each instance, the factor by which its interaction energy should
             be scaled.
@@ -1319,7 +1332,7 @@ class CustomCompoundBondForceHandler(ForceHandler):
                     tuple(bond_parameter_names[template_index][force_index]),
                     tuple(derivative_names[template_index][force_index]),
                     tuple(function_names[template_index][force_index]),
-                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                    tuple(DefaultTabulatedFunctionProcessor._process(function) for function in functions[template_index][force_index]),
                 ), {}).setdefault(template_index, []).append(force_index)
 
         for (
@@ -1354,7 +1367,7 @@ class CustomCompoundBondForceHandler(ForceHandler):
                 combined_force.addEnergyParameterDerivative(derivative_name)
 
             for function_name, function in zip(class_function_names, class_functions):
-                combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+                combined_force.addTabulatedFunction(function_name, DefaultTabulatedFunctionProcessor._process(function))
 
             for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
                 for force_index in class_forces.get(template_index, []):
@@ -1463,7 +1476,7 @@ class CustomCentroidBondForceHandler(ForceHandler):
                     tuple(bond_parameter_names[template_index][force_index]),
                     tuple(derivative_names[template_index][force_index]),
                     tuple(function_names[template_index][force_index]),
-                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                    tuple(DefaultTabulatedFunctionProcessor._process(function) for function in functions[template_index][force_index]),
                 ), {}).setdefault(template_index, []).append(force_index)
 
         for (
@@ -1498,7 +1511,7 @@ class CustomCentroidBondForceHandler(ForceHandler):
                 combined_force.addEnergyParameterDerivative(derivative_name)
 
             for function_name, function in zip(class_function_names, class_functions):
-                combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+                combined_force.addTabulatedFunction(function_name, DefaultTabulatedFunctionProcessor._process(function))
 
             for template_index, particle_offset, energy_scale in zip(template_indices, particle_offsets, energy_scales):
                 for force_index in class_forces.get(template_index, []):
@@ -1581,7 +1594,7 @@ class CustomNonbondedForceHandler(ForceHandler):
                 # list for a force can always be consulted to determine the
                 # particle pairs that should be interacting.
                 [force.getInteractionGroupParameters(group_index) for group_index in range(force.getNumInteractionGroups())]
-                if force.getNumInteractionGroups() else [tuple(range(force.getNumParticles()))] * 2
+                if force.getNumInteractionGroups() else [[tuple(range(force.getNumParticles()))] * 2]
                 for force in template_forces
             ]
             for template_forces in force_table
@@ -1645,7 +1658,7 @@ class CustomNonbondedForceHandler(ForceHandler):
                     tuple(particle_parameter_names[template_index][force_index]),
                     tuple(derivative_names[template_index][force_index]),
                     tuple(function_names[template_index][force_index]),
-                    tuple(openmm.XmlSerializer.serialize(function) for function in functions[template_index][force_index]),
+                    tuple(DefaultTabulatedFunctionProcessor._process(function) for function in functions[template_index][force_index]),
                 ), {}).setdefault(template_index, []).append(force_index)
         
         for (
@@ -1698,13 +1711,13 @@ class CustomNonbondedForceHandler(ForceHandler):
                     combined_force.addEnergyParameterDerivative(derivative_name)
 
                 for function_name, function in zip(class_function_names, class_functions):
-                    combined_force.addTabulatedFunction(function_name, openmm.XmlSerializer.deserialize(function))
+                    combined_force.addTabulatedFunction(function_name, DefaultTabulatedFunctionProcessor._process(function))
 
                 for template_index, particle_offset, next_particle_offset, energy_scale in zip(template_indices, particle_offsets, particle_offsets[1:], energy_scales):
                     if force_index < len(class_forces.get(template_index, [])):
                         for particle_parameter_values in particle_parameters[template_index][force_index]:
                             combined_force.addParticle([energy_scale, *particle_parameter_values])
-
+                        
                         for particle_indices_1, particle_indices_2 in group_parameters[template_index][force_index]:
                             combined_force.addInteractionGroup(
                                 [particle_index_1 + particle_offset for particle_index_1 in particle_indices_1],
@@ -1726,6 +1739,212 @@ class CustomNonbondedForceHandler(ForceHandler):
                             combined_force.addParticle([energy_scale] + [0] * len(class_particle_parameter_names))
                 
                 yield combined_force
+
+class TabulatedFunctionProcessor(Processor):
+    """
+    Represents a processor for dispatching the handling of
+    :py:class:`openmm.openmm.TabulatedFunction` objects to registered handler
+    objects.
+
+    .. py:method:: register_handler(handler)
+
+        Registers a tabulated function handler.  All tabulated function types
+        that the handler reports as handleable will be mapped to the handler,
+        overriding the mappings of any previously registered handlers also
+        reporting one or more of the same tabulated function types.
+
+        :type handler: multiopenmm.stack.TabulatedFunctionHandler
+        :param handler: The handler to register.
+    """
+
+    __slots__ = ()
+
+    def _check_handler(self, handler):
+        if not isinstance(handler, TabulatedFunctionHandler):
+            raise TypeError("handler must be a TabulatedFunctionHandler")
+
+    def _process(self, function):
+        handler_table = self._handler_table
+        
+        # If a tuple is received, a tabulated function object should be
+        # reconstructed from the given type and data.  If a tabulated function
+        # object is received, it should be deconstructed into a tuple containing
+        # its type and data generated by a handler.
+        reconstruct = isinstance(function, tuple)
+        if reconstruct:
+            function_type, function_data = function
+        else:
+            function_type = type(function)
+            function_data = function
+
+        # When processing a tabulated function, search through its method
+        # resolution order list such that the handler table will be searched
+        # first for the type of the tabulated function itself, followed by base
+        # classes.
+        for base_type in function_type.mro():
+            if base_type in handler_table:
+                if reconstruct:
+                    return handler_table[base_type].reconstruct(function_type, function_data)
+                else:
+                    return (function_type, handler_table[base_type].deconstruct(function))
+        else:
+            raise TypeError(f"{function_type.__name__} is unsupported")
+
+class TabulatedFunctionHandler(abc.ABC):
+    """
+    An abstract class that can be inherited from to define a custom handler for
+    one or more :py:class:`openmm.openmm.TabulatedFunction` subclasses.
+
+    Once such a handler has been defined, an instance of it must be registered,
+    *e.g.*:
+
+    .. code-block::
+
+        class MyCustomTabulatedFunctionHandler(multiopenmm.stack.TabulatedFunctionHandler):
+            @property
+            def handled_types(self):
+                return (MyCustomOpenMMTabulatedFunction,)
+
+            def deconstruct(self, function):
+                ...
+                return ...
+
+            def reconstruct(self, function_type, function_data):
+                ...
+                return MyCustomOpenMMTabulatedFunction(...)
+
+        multiopenmm.stack.DefaultTabulatedFunctionProcessor.register_handler(MyCustomTabulatedFunctionHandler())
+
+    Notes
+    -----
+    It is trivial to implement :py:meth:`deconstruct` and :py:meth:`reconstruct`
+    using :py:meth:`openmm.openmm.XmlSerializer.serialize` and
+    :py:meth:`openmm.openmm.XmlSerializer.deserialize`, respectively.  In fact,
+    this is the default behavior for tabulated function types without a
+    registered handler.  This mechanism, however, allows for the registration of
+    alternative handlers that can be much faster than
+    :py:class:`openmm.openmm.XmlSerializer`.  This can be significant for
+    combined systems having many instances, each containing forces with
+    tabulated functions having large tables of values.
+    """
+
+    __slots__ = ()
+
+    @property
+    @abc.abstractmethod
+    def handled_types(self):
+        """
+        tuple(type): The types of objects that can be handled by this handler.
+        Each type should be a subclass of
+        :py:class:`openmm.openmm.TabulatedFunction`.
+
+        Notes
+        -----
+        This property must be implemented in derived classes.  A handler only
+        handling objects of a single type should return a tuple of length 1.
+        """
+
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def deconstruct(self, function):
+        """
+        Losslessly creates an immutable representation of a tabulated function
+        that can be used as a dictionary key.
+
+        Parameters
+        ----------
+        function : openmm.openmm.TabulatedFunction
+            The tabulated function to deconstruct.
+
+        Returns
+        -------
+        object
+            A hashable representation of the tabulated function containing
+            sufficient information to create an exact copy of the tabulated
+            function.
+
+        Notes
+        -----
+        This method must be implemented in derived classes.
+        """
+
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def reconstruct(self, function_type, function_data):
+        """
+        Recreates a tabulated function from an immutable representation
+        previously created by :py:meth:`deconstruct`.
+
+        Parameters
+        ----------
+        function_type : type
+            The type of the tabulated function from which the deconstruction was
+            created.
+        function_data : object
+            A representation of a tabulated function created by
+            :py:meth:`deconstruct`.
+
+        Returns
+        -------
+        openmm.openmm.TabulatedFunction
+            An exact copy of the tabulated function originally provided to
+            :py:meth:`deconstruct`.
+
+        Notes
+        -----
+        This method must be implemented in derived classes.
+        """
+
+        raise NotImplementedError
+
+class FallbackTabulatedFunctionHandler(TabulatedFunctionHandler):
+    __slots__ = ()
+
+    @property
+    def handled_types(self):
+        return (openmm.TabulatedFunction,)
+
+    def deconstruct(self, function):
+        return openmm.XmlSerializer.serialize(function)
+
+    def reconstruct(self, function_type, function_data):
+        return openmm.XmlSerializer.deserialize(function_data)
+
+class DiscreteFunctionHandler(TabulatedFunctionHandler):
+    __slots__ = ()
+
+    @property
+    def handled_types(self):
+        return (openmm.Discrete1DFunction, openmm.Discrete2DFunction, openmm.Discrete3DFunction)
+
+    def deconstruct(self, function):
+        result = tuple(function.getFunctionParameters())
+
+        # Discrete1DFunction has only a single parameter and returns it directly
+        # instead of wrapping it in a list of length 1, but Discrete2DFunction
+        # and Discrete3DFunction have multiple parameters and return them in a
+        # list, so normalize the result as appropriate to allow tuple unpacking
+        # during function reconstruction later.
+        return (result,) if isinstance(function, openmm.Discrete1DFunction) else result
+
+    def reconstruct(self, function_type, function_data):
+        return function_type(*function_data)
+
+class ContinuousFunctionHandler(TabulatedFunctionHandler):
+    __slots__ = ()
+
+    @property
+    def handled_types(self):
+        return (openmm.Continuous1DFunction, openmm.Continuous2DFunction, openmm.Continuous3DFunction)
+
+    def deconstruct(self, function):
+        return (tuple(function.getFunctionParameters()), function.getPeriodic())
+
+    def reconstruct(self, function_type, function_data):
+        function_parameters, periodic = function_data
+        return function_type(*function_parameters, periodic=periodic)
 
 def _get_scale_name(function, parameter_names, prefix="scale"):
     # Retrieves an appropriate name for a scale parameter (such that the name
@@ -1773,3 +1992,12 @@ DefaultForceProcessor.register_handler(CustomTorsionForceHandler())
 DefaultForceProcessor.register_handler(CustomCompoundBondForceHandler())
 DefaultForceProcessor.register_handler(CustomCentroidBondForceHandler())
 DefaultForceProcessor.register_handler(CustomNonbondedForceHandler())
+
+#: multiopenmm.stack.TabulatedFunctionProcessor: The tabulated function
+# processor used by :py:func:`multiopenmm.stack.stack` to process all tabulated
+# functions in forces in OpenMM systems.
+DefaultTabulatedFunctionProcessor = TabulatedFunctionProcessor()
+
+DefaultTabulatedFunctionProcessor.register_handler(FallbackTabulatedFunctionHandler())
+DefaultTabulatedFunctionProcessor.register_handler(DiscreteFunctionHandler())
+DefaultTabulatedFunctionProcessor.register_handler(ContinuousFunctionHandler())

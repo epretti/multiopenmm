@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .support import MultiOpenMMError, MultiOpenMMWarning
+from .support import MultiOpenMMError, MultiOpenMMWarning, get_scratch_directory, set_scratch_directory
 from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble
-from .concurrent import Manager
+from .concurrency import Manager, SynchronousManager
+from .simulation import PlatformData

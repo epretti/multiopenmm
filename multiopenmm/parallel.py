@@ -22,12 +22,46 @@
 
 import abc
 import enum
+import gzip
 import io
 import numpy
 import openmm
 import pickle
+import scipy
+import tempfile
+import warnings
 
-from . import concurrent
+from . import concurrency
+from . import simulation
+from . import stacking
+from . import support
+
+#: float: The default periodic box vector length.
+DEFAULT_VECTOR_LENGTH = 2.0
+
+#: float: The default energy minimization tolerance.
+DEFAULT_MINIMIZE_TOLERANCE = 10.0
+
+#: int: The default energy minimization iteration count.
+DEFAULT_MINIMIZE_ITERATION_COUNT = 0
+
+#: float: The default step length property value.
+DEFAULT_STEP_LENGTH = 0.002
+
+#: float: The default constraint tolerance property value.
+DEFAULT_CONSTRAINT_TOLERANCE = 0.00001
+
+#: float: The default temperature property value.
+DEFAULT_TEMPERATURE = 300.0
+
+#: float: The default pressure property value.
+DEFAULT_PRESSURE = 1.0
+
+#: float: The default thermostat characteristic time property value.
+DEFAULT_THERMOSTAT_STEPS = 100.0
+
+#: int: The default barostat characteristic time property value.
+DEFAULT_BAROSTAT_STEPS = 25
 
 class Precision(enum.Enum):
     """
@@ -99,16 +133,17 @@ class Simulation:
         otherwise identical parameters will produce different output.  However,
         two simulations created with identical parameters including seeds may or
         may not produce identical output, depending on whether or not the OpenMM
-        platform or platforms used to run the simulations are deterministic.
-        For more information, consult the
+        platform or platforms used to run the simulations, and the manager used,
+        are deterministic.  For more information, consult the
         `OpenMM user guide <http://docs.openmm.org/latest/userguide/library/04_platform_specifics.html#determinism>`_.
     """
 
     __slots__ = ("__templates", "__manager", "__ensemble", "__precision",
         "__rng", "__template_count", "__template_sizes", "__property_types",
-        "__type", "__instance_count", "__template_indices", "__instance_sizes",
-        "__instance_offsets", "__stacks", "__vectors", "__positions",
-        "__velocities", "__property_values")
+        "__property_defaults", "__type", "__instance_count",
+        "__template_indices", "__instance_sizes", "__instance_offsets",
+        "__stacks", "__vectors", "__positions", "__velocities",
+        "__property_values", "__cache_directory", "__cache_index")
 
     def __init__(self, templates, manager, ensemble, precision=Precision.DOUBLE, seed=None):
         # Make copies of the system objects to ensure that external changes to
@@ -119,7 +154,7 @@ class Simulation:
                 raise TypeError("template must be an OpenMM System")
             self.__templates.append(openmm.XmlSerializer.clone(template))
 
-        if not isinstance(manager, concurrent.Manager):
+        if not isinstance(manager, concurrency.Manager):
             raise TypeError("manager must be a Manager")
         if not isinstance(ensemble, Ensemble):
             raise TypeError("ensemble must be an Ensemble")
@@ -135,6 +170,7 @@ class Simulation:
         self.__template_count = len(self.__templates)
         self.__template_sizes = numpy.array([template.getNumParticles() for template in self.__templates], dtype=int)
         self.__property_types = self.__ensemble.property_types
+        self.__property_defaults = self.__ensemble.property_defaults
         self.__type = self.__precision.type
 
         # Initialize the simulation with no instances.
@@ -147,6 +183,10 @@ class Simulation:
         self.__positions = numpy.zeros((0, 3), dtype=self.__type)
         self.__velocities = numpy.zeros((0, 3), dtype=self.__type)
         self.__property_values = {name: numpy.zeros(0, dtype=type) for name, type in self.__property_types.items()}
+
+        # Cache combined systems created from these templates.
+        self.__cache_directory = tempfile.TemporaryDirectory(prefix="multiopenmm_cache_", dir=support.get_scratch_directory(), ignore_cleanup_errors=True)
+        self.__cache_index = {}
 
     @property
     def precision(self):
@@ -176,6 +216,18 @@ class Simulation:
         return dict(self.__property_types)
 
     @property
+    def property_defaults(self):
+        """
+        dict: Names and default values for ensemble-specific properties
+        associated with the simulation.  Not every property may have a default
+        value, in which case its name will only appear as a key in
+        :py:attr:`property_types` and not in :py:attr:`property_defaults`.  In
+        this case, the property will behave as if its default value is zero.
+        """
+
+        return dict(self.__property_defaults)
+
+    @property
     def instance_count(self):
         """
         int: The number of molecular system instances.
@@ -183,7 +235,8 @@ class Simulation:
         If this value is increased, new instances will be added after the
         existing instances.  If it is decreased, instances at the end of the
         sequence of existing instances will be removed.  Newly added instances
-        will have their properties set to zero.
+        will have their properties set to default values, or zero if no default
+        values exist for the properties.
         """
 
         return self.__instance_count
@@ -201,12 +254,12 @@ class Simulation:
         old_offsets = self.__update_instance_data()
 
         self.__stacks = self.__adjust_per_instance(self.__stacks)
-        self.__vectors = self.__adjust_per_instance(self.__vectors)
+        self.__vectors = self.__adjust_per_instance(self.__vectors, DEFAULT_VECTOR_LENGTH * numpy.eye(3))
         self.__positions = self.__adjust_per_particle(self.__positions, old_offsets)
         self.__velocities = self.__adjust_per_particle(self.__velocities, old_offsets)
         
         for name in tuple(self.__property_values.keys()):
-            self.__property_values[name] = self.__adjust_per_instance(self.__property_values[name])
+            self.__property_values[name] = self.__adjust_per_instance(self.__property_values[name], self.__property_defaults.get(name, 0))
 
     def reorder_instances(self, source_indices, destination_indices):
         """
@@ -478,12 +531,12 @@ class Simulation:
 
     def set_stacks(self, stacks, indices=None):
         """
-        Updates stack indices for the specified instances.
+        Updates stack identifiers for the specified instances.
 
         Parameters
         ----------
         stacks : int or array of int
-            Stack indices for all or each of the specified instances.  This
+            Stack identifiers for all or each of the specified instances.  This
             parameter will be broadcast to an appropriate shape for the instance
             specification.
         indices : int, slice, array of int, or array of bool, optional
@@ -541,7 +594,6 @@ class Simulation:
         --------
         get_positions
         load
-        minimize
         """
 
         self.__set_per_particle(self.__positions, indices, positions)
@@ -565,7 +617,6 @@ class Simulation:
         --------
         get_velocities
         load
-        maxwell_boltzmann
         """
 
         self.__set_per_particle(self.__velocities, indices, velocities)
@@ -737,7 +788,56 @@ class Simulation:
             self.set_positions(data["positions"].astype(self.__type, copy=False), indices)
         if velocities or (velocities is None and "velocities" in data):
             self.set_velocities(data["velocities"].astype(self.__type, copy=False), indices)
- 
+
+    def apply_constraints(self, positions=True, velocities=True, indices=None):
+        """
+        Applies constraints to either the positions or the velocities, or both,
+        of the specified instances.
+
+        Parameters
+        ----------
+        positions : bool, optional
+            Whether or not to apply constraints to position coordinates (by
+            default, they will be applied).
+        velocities : bool, optional
+            Whether or not to apply constraints to velocity components (by
+            default, they will be applied).
+        indices : int, slice, array of int, or array of bool, optional
+            Specification of instances.  By default, all instances will be
+            selected.
+        """
+
+        if not isinstance(positions, bool):
+            raise TypeError("positions must be a bool")
+        if not isinstance(velocities, bool):
+            raise TypeError("velocities must be a bool")
+
+        combined_systems = self.__get_combined_systems(indices)
+
+        for response, system_data in zip(self.__manager._distribute(*(
+            support.Arguments(
+                system_data["system_path"],
+                system_data["context_data"],
+                self.__rng.spawn(1)[0],
+                system_data["vectors"],
+                self.get_positions(system_data["indices"]) if positions or velocities else None,
+                self.get_velocities(system_data["indices"]) if velocities else None,
+                False,
+                positions,
+                velocities,
+                False,
+                system_data["enforce_periodic"],
+                system_data["center_coordinates"],
+                (simulation.Command.APPLY_CONSTRAINTS, support.Arguments(positions, velocities)),
+            )
+            for stack, system_data in combined_systems.items())), combined_systems.values()):
+
+            _, positions_velocities_out = response()
+            if positions:
+                self.set_positions(positions_velocities_out[0], system_data["indices"])
+            if velocities:
+                self.set_velocities(positions_velocities_out[1 if positions else 0], system_data["indices"])
+
     def minimize(self, tolerance=None, iteration_count=None, indices=None):
         """
         Finds a local potential energy minimum for the specified instances, and
@@ -759,8 +859,38 @@ class Simulation:
             selected.
         """
 
-        # TODO: Implementation.
-        raise NotImplementedError
+        if tolerance is None:
+            tolerance = DEFAULT_MINIMIZE_TOLERANCE
+        elif not isinstance(tolerance, float):
+            raise TypeError("tolerance must be a float or None")
+
+        if iteration_count is None:
+            iteration_count = DEFAULT_MINIMIZE_ITERATION_COUNT
+        elif not isinstance(iteration_count, int):
+            raise TypeError("iteration_count must be an int or None")
+        
+        combined_systems = self.__get_combined_systems(indices)
+
+        for response, system_data in zip(self.__manager._distribute(*(
+            support.Arguments(
+                system_data["system_path"],
+                system_data["context_data"],
+                self.__rng.spawn(1)[0],
+                system_data["vectors"],
+                self.get_positions(system_data["indices"]),
+                None,
+                False,
+                True,
+                False,
+                False,
+                system_data["enforce_periodic"],
+                system_data["center_coordinates"],
+                (simulation.Command.MINIMIZE, support.Arguments(tolerance, iteration_count)),
+            )
+            for stack, system_data in combined_systems.items())), combined_systems.values()):
+
+            _, (positions_out,) = response()
+            self.set_positions(positions_out, system_data["indices"])
 
     def maxwell_boltzmann(self, indices=None):
         """
@@ -773,24 +903,224 @@ class Simulation:
             Specification of instances.  By default, all instances will be
             selected.
         """
-       
-        # TODO: Implementation.
-        raise NotImplementedError
 
-    def integrate(self, step_count, swap_spec, write_spec):
-        # TODO: Specification of selection criterion, exchange criterion,
-        # exchange frequency, save format, save frequency, etc.  Documentation
-        # and implementation.
-        raise NotImplementedError
+        combined_systems = self.__get_combined_systems(indices)
+
+        for response, system_data in zip(self.__manager._distribute(*(
+            support.Arguments(
+                system_data["system_path"],
+                system_data["context_data"],
+                self.__rng.spawn(1)[0],
+                system_data["vectors"],
+                self.get_positions(system_data["indices"]),
+                None,
+                False,
+                False,
+                True,
+                False,
+                system_data["enforce_periodic"],
+                system_data["center_coordinates"],
+                (simulation.Command.MAXWELL_BOLTZMANN, support.Arguments(system_data["run_temperature"])),
+            )
+            for stack, system_data in combined_systems.items())), combined_systems.values()):
+
+            _, (velocities_out,) = response()
+            self.set_velocities(velocities_out, system_data["indices"])
+
+    def evaluate_energies(self, indices=None):
+        """
+        Evaluates the potential and kinetic energies of the specified instances.
+
+        Parameters
+        ----------
+        indices : int, slice, array of int, or array of bool, optional
+            Specification of instances.  By default, all instances will be
+            selected.
+
+        Returns
+        -------
+        tuple(array of float)
+            For all specified instances, the potential energy of each, and for
+            all specified instances, the kinetic energy of each.
+        """
+
+        # Save the current stack identifiers since we will require each instance
+        # to have a dedicated OpenMM system for the energy evaluation.
+        old_stacks = self.get_stacks()
+
+        try:
+            self.set_stacks_separate()
+            combined_systems = self.__get_combined_systems(indices)
+
+            potential_energies = {}
+            kinetic_energies = {}
+
+            for response, system_data in zip(self.__manager._distribute(*(
+                support.Arguments(
+                    system_data["system_path"],
+                    system_data["context_data"],
+                    self.__rng.spawn(1)[0],
+                    system_data["vectors"],
+                    self.get_positions(system_data["indices"]),
+                    self.get_velocities(system_data["indices"]),
+                    False,
+                    False,
+                    False,
+                    True,
+                    system_data["enforce_periodic"],
+                    system_data["center_coordinates"],
+                )
+                for stack, system_data in combined_systems.items())), combined_systems.values()):
+
+                # This assumes that set_stacks_separate() sets stacks 0, 1, 2,
+                # etc., and that stacks containing single instances will have
+                # temperature scales of 1.  This should be the case.
+                _, (potential_energy_out, kinetic_energy_out) = response()
+                stack_index, = system_data["indices"]
+                potential_energies[stack_index] = potential_energy_out
+                kinetic_energies[stack_index] = kinetic_energy_out
+
+        finally:
+            self.set_stacks(old_stacks)
+
+        indices = self.__resolve_with_size(self.__instance_count, indices)
+        return (
+            numpy.array([potential_energies[index] for index in indices]),
+            numpy.array([kinetic_energies[index] for index in indices]),
+        )
+
+    def integrate(self, step_count, write_start=None, write_stop=None, write_step=None, indices=None):
+        """
+        Runs molecular dynamics for the specified instances, and updates
+        periodic box vector components, position coordinates, and velocity
+        components.
+
+        Parameters
+        ----------
+        step_count : int
+            Number of steps over which to integrate.
+        write_start : int, optional
+            The index of the first step at which to write positions.
+        write_stop : int, optional
+            The index of the first step at which to cease writing positions.
+        write_step : int, optional
+            The interval in steps at which to write positions after the first
+            step at which positions have been written.
+        indices : int, slice, array of int, or array of bool, optional
+            Specification of instances.  By default, all instances will be
+            selected.
+
+        Notes
+        -----
+        If neither ``write_start``, ``write_stop``, nor ``write_step`` are
+        given, no writing will occur.  Otherwise, writing will occur at the
+        steps corresponding to a slice constructed from the given parameters.
+
+        Returns
+        -------
+        tuple(str), array of int, array of int, array of int, array of int
+            First, an array of paths to which trajectory data has been written.
+            Then, arrays of indices into the array of paths, byte offsets into
+            trajectory files, particle offsets into
+            For all specified instances, the potential energy of each, and for
+            all specified instances, the kinetic energy of each.
+
+        """
+
+        if not isinstance(step_count, int):
+            raise TypeError("step_count must be an int")
+        if step_count < 0:
+            raise ValueError("step_count must be non-negative")
+
+        if write_start is not None:
+            if not isinstance(write_start, int):
+                raise TypeError("write_start must be an int")
+            if write_start < 0:
+                raise ValueError("write_start must be non-negative")
+
+        if write_stop is not None:
+            if not isinstance(write_stop, int):
+                raise TypeError("write_stop must be an int")
+            if write_stop < 0:
+                raise ValueError("write_stop must be non-negative")
+
+        if write_step is not None:
+            if not isinstance(write_step, int):
+                raise TypeError("write_step must be an int")
+            if write_step < 1:
+                raise ValueError("write_step must be positive")
+
+        if write_start is None and write_stop is None and write_step is None:
+            write_start = write_stop = 0
+            write_step = 1
+
+        indices = self.__resolve_with_size(self.__instance_count, indices)
+        combined_systems = self.__get_combined_systems(indices)
+
+        integrate_results = []
+
+        for response, system_data in zip(self.__manager._distribute(*(
+            support.Arguments(
+                system_data["system_path"],
+                system_data["context_data"],
+                self.__rng.spawn(1)[0],
+                system_data["vectors"],
+                self.get_positions(system_data["indices"]),
+                self.get_velocities(system_data["indices"]),
+                True,
+                True,
+                True,
+                False,
+                system_data["enforce_periodic"],
+                system_data["center_coordinates"],
+                (simulation.Command.INTEGRATE, support.Arguments(step_count, write_start, write_stop, write_step)),
+            )
+            for stack, system_data in combined_systems.items())), combined_systems.values()):
+
+            (integrate_result,), (vectors_out, positions_out, velocities_out) = response()
+            self.set_vectors(vectors_out, system_data["indices"])
+            self.set_positions(positions_out, system_data["indices"])
+            self.set_velocities(velocities_out, system_data["indices"])
+            integrate_results.append(integrate_result)
+
+        expected_frame_count = len(range(step_count)[write_start:write_stop:write_step])
+        path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integrate_results)))}
+
+        path_indices = {}
+        byte_offsets = {}
+        particle_indices_start = {}
+        particle_indices_end = {}
+
+        for system_data, (path, byte_offset, frame_count, particle_offsets) in zip(combined_systems.values(), integrate_results):
+            if frame_count != expected_frame_count:
+                raise RuntimeError("unexpected number of frames")
+
+            stack_indices = system_data["indices"]
+            if not stack_indices.size + 1 == particle_offsets.size:
+                raise RuntimeError("unexpected number of offsets")
+
+            for stack_index, particle_index_start, particle_index_end in zip(stack_indices, particle_offsets[:-1], particle_offsets[1:]):
+                path_indices[stack_index] = path_table[path]
+                byte_offsets[stack_index] = byte_offset
+                particle_indices_start[stack_index] = particle_index_start
+                particle_indices_end[stack_index] = particle_index_end
+
+        return IntegrateResult((
+            tuple(path_table), 
+            numpy.array([path_indices[index] for index in indices], dtype=int),
+            numpy.array([byte_offsets[index] for index in indices], dtype=int),
+            numpy.array([particle_indices_start[index] for index in indices], dtype=int),
+            numpy.array([particle_indices_end[index] for index in indices], dtype=int),
+        ))
 
     def __update_instance_data(self):
-        # Updates tables used to slice arrays containing per-particle properties.
-        # In particular, when self.__template_indices is changed, this method can check
-        # for valid template indices, then update self.__instance_sizes
-        # (containing the number of particles in each instance) and
-        # self.__instance_offsets (whose consecutive pairs of indices can be
-        # used to create ranges or slices including the indices of particles
-        # belonging to individual instances).
+        # Updates tables used to slice arrays containing per-particle
+        # properties.  In particular, when self.__template_indices is changed,
+        # this method can check for valid template indices, then update
+        # self.__instance_sizes (containing the number of particles in each
+        # instance) and self.__instance_offsets (whose consecutive pairs of
+        # indices can be used to create ranges or slices including the indices
+        # of particles belonging to individual instances).
 
         if numpy.any((self.__template_indices < 0) | (self.__template_indices >= self.__template_count)):
             # If no templates are present, no valid template indices will exist,
@@ -804,10 +1134,11 @@ class Simulation:
         old_offsets, self.__instance_offsets = self.__instance_offsets, numpy.concatenate(((0,), numpy.cumsum(self.__instance_sizes)))
         return old_offsets
 
-    def __adjust_per_instance(self, array):
+    def __adjust_per_instance(self, array, padding_value=0):
         # Adjusts the size of the first dimension of a NumPy array to match the
         # current number of instances, by either truncation or padding with
-        # zeros.  The array, a slice of it, or a new array, might be returned.
+        # a given value.  The array, a slice of it, or a new array, might be
+        # returned.
 
         length = array.shape[0]
 
@@ -819,9 +1150,9 @@ class Simulation:
         if self.__instance_count < length:
             return array[:self.__instance_count]
 
-        # Otherwise, the array must grow; create a new array of zeros and copy
-        # in the items.
-        new_array = numpy.zeros((self.__instance_count, *array.shape[1:]), dtype=array.dtype)
+        # Otherwise, the array must grow; create a new array of the given
+        # padding value and copy in the items.
+        new_array = numpy.full((self.__instance_count, *array.shape[1:]), padding_value, dtype=array.dtype)
         new_array[:length] = array
         return new_array
 
@@ -859,6 +1190,162 @@ class Simulation:
         indices = self.__resolve_with_offsets(self.__instance_offsets, indices)
         array[indices] = numpy.broadcast_to(values, (indices.size, *array.shape[1:]))
 
+    def __get_combined_systems(self, indices):
+        # Creates combined OpenMM systems based on the current parallel
+        # simulation state.
+
+        # Process the specification of instances to create combined OpenMM
+        # systems from, and retrieve the stack identifiers indicating the stacks
+        # that actually need to have combined systems created from them.
+        indices = self.__resolve_with_size(self.__instance_count, indices)
+        stack_set = numpy.unique(self.__stacks[indices])
+
+        # Check the selected ensemble type.
+        if isinstance(self.__ensemble, CanonicalEnsemble):
+            npt = False
+        elif isinstance(self.__ensemble, IsothermalIsobaricEnsemble):
+            npt = True
+        else:
+            raise RuntimeError("unrecognized ensemble type")
+
+        # Retrieve whether or not to enforce periodic boundary conditions and
+        # center coordinates (these property values can differ per instance).
+        enforce_periodic = self.__property_values["enforce_periodic"][indices]
+        center_coordinates = self.__property_values["center_coordinates"][indices]
+
+        # Retrieve the step length.  This is done across all stacks so that
+        # simulating stacks separately does not advance simulation times non-
+        # uniformly.  If no systems are selected, step_length will not be set,
+        # but it will not be used as stack_set will be empty and the body of the
+        # loop processing each stack will never execute.
+        step_length_array = self.__property_values["step_length"][indices]
+        if step_length_array.size:
+            step_length = step_length_array[0]
+            if numpy.any(step_length_array[1:] != step_length):
+                warnings.warn("Mismatched step lengths; choosing length from first instance selected", support.MultiOpenMMWarning)
+
+        # Ensure that stacking does not occur for simulations in the
+        # isothermal-isobaric ensemble (where instance periodic box vectors may
+        # change independently of each other).
+        if npt:
+            if indices.size != stack_set.size:
+                raise support.MultiOpenMMError("simulations in the isothermal-isobaric ensemble may not use stacking")
+
+        # Process each stack identifier.
+        combined_systems = {}
+        for stack in stack_set:
+            mask = self.__stacks[indices] == stack
+
+            # Retrieve vectors for the stack.
+            vectors_array = self.__vectors[indices][mask]
+            vectors = vectors_array[0]
+            if numpy.any(vectors_array[1:] != vectors):
+                warnings.warn("Mismatched periodic box vectors; choosing vectors from first instance selected", support.MultiOpenMMWarning)
+
+            # Retrieve the integrator constraint tolerance.  For each stack,
+            # there will be at least one instance, so for this and other
+            # properties, there will be at least one value.
+            constraint_tolerance_array = self.__property_values["constraint_tolerance"][indices][mask]
+            constraint_tolerance = constraint_tolerance_array[0]
+            if numpy.any(constraint_tolerance_array[1:] != constraint_tolerance):
+                warnings.warn("Mismatched constraint tolerances; choosing tolerance from first instance selected", support.MultiOpenMMWarning)
+
+            # Calculate an average run temperature for the combined system so
+            # that the scale factors associated with individual instances will
+            # be close to 1.
+            temperatures = self.__property_values["temperature"][indices][mask]
+            run_temperature = scipy.stats.gmean(temperatures)
+
+            # Retrieve the thermostat characteristic time and calculate the
+            # friction coefficient or collision frequency for the thermostat.
+            thermostat_steps_array = self.__property_values["thermostat_steps"][indices][mask]
+            thermostat_steps = thermostat_steps_array[0]
+            if numpy.any(thermostat_steps_array[1:] != thermostat_steps):
+                warnings.warn("Mismatched thermostat characteristic times; choosing time from first instance selected", support.MultiOpenMMWarning)
+            friction = 1 / (step_length * thermostat_steps)
+
+            set_tolerance_method = ("setConstraintTolerance", support.Arguments(constraint_tolerance))
+            forces = []
+
+            match self.__ensemble.thermostat:
+                case Thermostat.ANDERSEN:
+                    integrator_data = simulation.ObjectData(
+                        openmm.VerletIntegrator,
+                        support.Arguments(step_length),
+                        False,
+                        set_tolerance_method,
+                    )
+                    forces.append(simulation.ObjectData(
+                        openmm.AndersenThermostat,
+                        support.Arguments(run_temperature, friction),
+                        True,
+                    ))
+
+                case Thermostat.LANGEVIN:
+                    integrator_data = simulation.ObjectData(
+                        openmm.LangevinMiddleIntegrator,
+                        support.Arguments(run_temperature, friction, step_length),
+                        True,
+                        set_tolerance_method,
+                    )
+
+                case Thermostat.BROWNIAN:
+                    integrator_data = simulation.ObjectData(
+                        openmm.BrownianIntegrator,
+                        support.Arguments(run_temperature, friction, step_length),
+                        True,
+                        set_tolerance_method,
+                    )
+
+                case _:
+                    raise RuntimeError("unrecognized Thermostat")
+
+            if npt:
+                # In the isothermal-isobaric ensemble, it has already been
+                # checked that stacking will not occur, so there will be single
+                # values for pressure and the barostat characteristic time.
+                pressure, = self.__property_values["pressure"][indices][mask]
+                barostat_steps, = self.__property_values["barostat_steps"][indices][mask]
+
+                match self.__ensemble.barostat:
+                    case Barostat.MC_ISOTROPIC:
+                        forces.append(simulation.ObjectData(
+                            openmm.MonteCarloBarostat,
+                            support.Arguments(pressure, run_temperature, barostat_steps),
+                            True,
+                        ))
+
+                    case _:
+                        raise RuntimeError("unrecognized Barostat")
+           
+            # For each combined system, return a dictionary containing the
+            # system and information about it.
+            combined_systems[stack] = dict(
+                center_coordinates=center_coordinates[mask],
+                context_data=simulation.ContextData(integrator_data, *forces),
+                enforce_periodic=enforce_periodic[mask],
+                indices=indices[mask],
+                run_temperature=run_temperature,
+                system_path=self.__get_combined_system(self.__template_indices[indices][mask], temperatures / run_temperature),
+                vectors=vectors,
+            )
+
+        return combined_systems
+    
+    def __get_combined_system(self, template_indices, temperature_scales):
+        # Creates a combined OpenMM system, pickles it, and stores in the cache
+        # index the path to the pickle file for the combined system parameters.
+
+        key = (tuple(template_indices), tuple(temperature_scales))
+
+        if key not in self.__cache_index:
+            with tempfile.NamedTemporaryFile(prefix="multiopenmm_system_", suffix=".pickle.gz", dir=self.__cache_directory.name, delete=False) as file:
+                with gzip.GzipFile("", "wb", fileobj=file, compresslevel=1, mtime=0) as compressor:
+                    pickle.dump(stacking.stack(self.__templates, template_indices, temperature_scales), compressor)
+            self.__cache_index[key] = file.name
+
+        return self.__cache_index[key]
+    
     @classmethod
     def __resolve_with_size(cls, size, indices):
         # Converts an index, list of indices, array of indices, slice, or mask
@@ -880,12 +1367,23 @@ class Simulation:
         # array to ensure that only non-empty lists of arrays are concatenated.
         indices = cls.__resolve_with_size(offsets.size - 1, indices)
         return numpy.concatenate([numpy.arange(offsets[index], offsets[index + 1]) for index in indices]) if indices.size else indices
-
+    
 class Ensemble(abc.ABC):
     """
     Represents a generic ensemble.  Subclasses represent specific ensembles.
-    Adds the property ``step_length`` (:py:class:`float`) to molecular system
-    instances.
+    Adds the properties ``enforce_periodic`` (:py:class:`bool`),
+    ``center_coordinates`` (:py:class:`bool`), ``step_length``
+    (:py:class:`float`), and ``constraint_tolerance`` (:py:class:`float`) to
+    molecular system instances.  Here, ``enforce_periodic`` controls whether or
+    not periodic boundary conditions are applied to coordinates retrieved from
+    OpenMM contexts (this will usually be desired when one or more forces use
+    periodic boundary conditions), and ``center_coordinates`` controls whether
+    or not coordinates retrieved from OpenMM contexts will be adjusted to place
+    instance centers of mass at the origin (this will usually be desired when no
+    forces use periodic boundary conditions).  ``step_length`` controls the time
+    elapsed per integration step, while ``constraint_tolerance`` adjusts the
+    tolerance to which position coordinates and velocity components should be
+    held to satisfy rigid constraints.
     """
 
     __slots__ = ()
@@ -893,13 +1391,32 @@ class Ensemble(abc.ABC):
     @property
     @abc.abstractmethod
     def property_types(self):
-        return {"step_length": float}
+        return {
+            "enforce_periodic": bool,
+            "center_coordinates": bool,
+            "step_length": float,
+            "constraint_tolerance": float,
+        }
+
+    @property
+    @abc.abstractmethod
+    def property_defaults(self):
+        return {
+            "enforce_periodic": False,
+            "center_coordinates": False,
+            "step_length": DEFAULT_STEP_LENGTH,
+            "constraint_tolerance": DEFAULT_CONSTRAINT_TOLERANCE,
+        }
 
 class CanonicalEnsemble(Ensemble):
     """
     Represents a canonical ensemble maintained by a thermostat.  Adds the
     properties ``temperature`` (:py:class:`float`) and ``thermostat_steps``
-    (:py:class:`float`) to molecular system instances.
+    (:py:class:`float`) to molecular system instances.  Here,
+    ``thermostat_steps`` determines the characteristic time of the thermostat
+    (*i.e.*, the reciprocal of the collision frequency for an Andersen
+    thermostat, or the reciprocal of the friction coefficient for Langevin or
+    Brownian dynamics) in units of integration steps.
 
     Parameters
     ----------
@@ -928,7 +1445,19 @@ class CanonicalEnsemble(Ensemble):
 
     @property
     def property_types(self):
-        return {**super().property_types, "temperature": float, "thermostat_steps": float}
+        return {
+            **super().property_types,
+            "temperature": float,
+            "thermostat_steps": float,
+        }
+
+    @property
+    def property_defaults(self):
+        return {
+            **super().property_defaults,
+            "temperature": DEFAULT_TEMPERATURE,
+            "thermostat_steps": DEFAULT_THERMOSTAT_STEPS,
+        }
 
 class IsothermalIsobaricEnsemble(Ensemble):
     """
@@ -936,6 +1465,12 @@ class IsothermalIsobaricEnsemble(Ensemble):
     barostat.  Adds the properties ``temperature`` (:py:class:`float`),
     ``pressure`` (:py:class:`float`), ``thermostat_steps`` (:py:class:`float`),
     and ``barostat_steps`` (:py:class:`int`) to molecular system instances.
+    Here, ``thermostat_steps`` determines the characteristic time of the
+    thermostat (*i.e.*, the reciprocal of the collision frequency for an
+    Andersen thermostat, or the reciprocal of the friction coefficient for
+    Langevin or Brownian dynamics) in units of integration steps, and
+    ``barostat_steps`` likewise controls the frequency at which the barostat can
+    adjust the volumes of instances.
 
     Parameters
     ----------
@@ -978,4 +1513,31 @@ class IsothermalIsobaricEnsemble(Ensemble):
 
     @property
     def property_types(self):
-        return {**super().property_types, "temperature": float, "pressure": float, "thermostat_steps": float, "barostat_steps": int}
+        return {
+            **super().property_types,
+            "temperature": float,
+            "pressure": float,
+            "thermostat_steps": float,
+            "barostat_steps": int,
+        }
+
+    @property
+    def property_defaults(self):
+        return {
+            **super().property_defaults,
+            "temperature": DEFAULT_TEMPERATURE,
+            "pressure": DEFAULT_PRESSURE,
+            "thermostat_steps": DEFAULT_THERMOSTAT_STEPS,
+            "barostat_steps": DEFAULT_BAROSTAT_STEPS,
+        }
+
+class IntegrateResult:
+    """
+    Holds information specifying how trajectory frames were written during a
+    call to :py:meth:`Simulation.integrate`.
+    """
+
+    __slots__ = ("__path_table", "__path_indices", "__byte_offsets", "__particle_indices_start", "__particle_indices_end")
+
+    def __init__(self, data):
+        self.__path_table, self.__path_indices, self.__byte_offsets, self.__particle_indices_start, self.__particle_indices_end = data

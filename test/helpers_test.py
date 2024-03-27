@@ -20,5 +20,19 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-class Manager:
-    pass
+import numpy
+import openmm
+
+def help_check_equal(array_1, array_2):
+    assert array_1.shape == array_2.shape
+    assert numpy.all(array_1 == array_2)
+
+def help_make_templates(template_sizes=None, *, override=None):
+    if template_sizes is None:
+        return override
+
+    for template_size in template_sizes:
+        template = openmm.System()
+        for particle_index in range(template_size):
+            template.addParticle(1.0)
+        yield template

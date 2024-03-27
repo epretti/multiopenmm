@@ -30,33 +30,74 @@ Simulation setup
    :members:
    :member-order: bysource
 
+Default values
+^^^^^^^^^^^^^^
+
+.. autodata:: multiopenmm.parallel.DEFAULT_VECTOR_LENGTH
+.. autodata:: multiopenmm.parallel.DEFAULT_MINIMIZE_TOLERANCE
+.. autodata:: multiopenmm.parallel.DEFAULT_MINIMIZE_ITERATION_COUNT
+.. autodata:: multiopenmm.parallel.DEFAULT_STEP_LENGTH
+.. autodata:: multiopenmm.parallel.DEFAULT_CONSTRAINT_TOLERANCE
+.. autodata:: multiopenmm.parallel.DEFAULT_TEMPERATURE
+.. autodata:: multiopenmm.parallel.DEFAULT_PRESSURE
+.. autodata:: multiopenmm.parallel.DEFAULT_THERMOSTAT_STEPS
+.. autodata:: multiopenmm.parallel.DEFAULT_BAROSTAT_STEPS
+
 Running and restarting
 ----------------------
 
 Task management
 ---------------
 
+.. autoclass:: multiopenmm.Manager
+   :members:
+
+.. autoclass:: multiopenmm.SynchronousManager
+   :members:
+   :show-inheritance:
+
+.. autoclass:: multiopenmm.PlatformData
+   :members:
+
 Stacking customization
 ----------------------
 
-.. autofunction:: multiopenmm.stack.stack
+.. autofunction:: multiopenmm.stacking.stack
 
-.. autoclass:: multiopenmm.stack.VirtualSiteProcessor
+Virtual site handling
+^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: multiopenmm.stacking.VirtualSiteProcessor
    :members:
 
-.. autodata:: multiopenmm.stack.DefaultVirtualSiteProcessor
+.. autodata:: multiopenmm.stacking.DefaultVirtualSiteProcessor
    :annotation:
 
-.. autoclass:: multiopenmm.stack.VirtualSiteHandler
+.. autoclass:: multiopenmm.stacking.VirtualSiteHandler
    :members:
 
-.. autoclass:: multiopenmm.stack.ForceProcessor
+Force handling
+^^^^^^^^^^^^^^
+
+.. autoclass:: multiopenmm.stacking.ForceProcessor
    :members:
 
-.. autoclass:: multiopenmm.stack.ForceHandler
+.. autoclass:: multiopenmm.stacking.ForceHandler
    :members:
 
-.. autodata:: multiopenmm.stack.DefaultForceProcessor
+.. autodata:: multiopenmm.stacking.DefaultForceProcessor
+   :annotation:
+
+Tabulated function handling
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: multiopenmm.stacking.TabulatedFunctionProcessor
+   :members:
+
+.. autoclass:: multiopenmm.stacking.TabulatedFunctionHandler
+   :members:
+
+.. autodata:: multiopenmm.stacking.DefaultTabulatedFunctionProcessor
    :annotation:
 
 Miscellaneous
@@ -67,3 +108,7 @@ Miscellaneous
 
 .. autoclass:: multiopenmm.MultiOpenMMWarning
    :members:
+
+.. autofunction:: multiopenmm.get_scratch_directory
+
+.. autofunction:: multiopenmm.set_scratch_directory
