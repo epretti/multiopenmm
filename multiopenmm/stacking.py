@@ -1689,7 +1689,7 @@ class CustomNonbondedForceHandler(ForceHandler):
             # templates, multiple forces will need to be added to the combined
             # system to handle differing particle parameter values and
             # exclusions in general.
-            for force_index in range(max(map(len, class_forces.values()), default=0)):
+            for class_force_index in range(max(map(len, class_forces.values()), default=0)):
                 combined_force = openmm.CustomNonbondedForce(_scale_function(energy_function, f"{scale_name}1"))
                 combined_force.setNonbondedMethod(nonbonded_method)
                 combined_force.setUseSwitchingFunction(uses_switch)
@@ -1714,10 +1714,12 @@ class CustomNonbondedForceHandler(ForceHandler):
                     combined_force.addTabulatedFunction(function_name, DefaultTabulatedFunctionProcessor._process(function))
 
                 for template_index, particle_offset, next_particle_offset, energy_scale in zip(template_indices, particle_offsets, particle_offsets[1:], energy_scales):
-                    if force_index < len(class_forces.get(template_index, [])):
+                    if class_force_index < len(class_forces.get(template_index, [])):
+                        force_index = class_forces[template_index][class_force_index]
+
                         for particle_parameter_values in particle_parameters[template_index][force_index]:
                             combined_force.addParticle([energy_scale, *particle_parameter_values])
-                        
+
                         for particle_indices_1, particle_indices_2 in group_parameters[template_index][force_index]:
                             combined_force.addInteractionGroup(
                                 [particle_index_1 + particle_offset for particle_index_1 in particle_indices_1],

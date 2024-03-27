@@ -32,6 +32,7 @@ import openmm
 import os
 import pickle
 import pytest
+import sys
 import warnings
 
 HELP_TEMPLATE_SIZES = (
@@ -236,6 +237,104 @@ HELP_CUSTOM_COMPOUND_CLASS_DATA_LIST = (
             (("scaleb", openmm.Continuous1DFunction, (numpy.sin(numpy.arange(10)), -numpy.pi, numpy.pi, False)),)),
         (4, "scale*q1+scalea*q2+scaleb(q3);q1=angle(p1,p2,p3);q2=angle(p2,p3,p4);q3=dihedral(p1,p2,p3,p4)", False, (("scale", 2.0, True),), ("scalea",),
             (("scaleb", openmm.Continuous1DFunction, (numpy.sin(numpy.arange(10)), -numpy.pi, numpy.pi, False)),)),
+    ),
+)
+
+HELP_CUSTOM_NONBONDED_CLASS_DATA_LIST = (
+    (
+        ("(1+scale(r))/(r*r+(scaleb+scalec1)*(scaleb+scalec2))", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (), (("scaleb", 0.5, True),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(2+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.CutoffNonPeriodic, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, False, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, True, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 4, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 1, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 1, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False), ("scaled", 1.0, False)), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False), ("scaled", 1.0, False)), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 1, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False), ("scalee", 2.0, False)), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+(scaleb+scalec1)*(scaleb+scalec2))", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (), (("scaleb", 0.5, True),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+(scaleb+scalec1)*(scaleb+scalec2))", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec", "scaled"),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec", "scaled"),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec", "scalee"),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),
+                ("scaled", openmm.Continuous1DFunction, (2 + numpy.cos(numpy.linspace(0, 1, 10)), 0, 3, False)))),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+    ),
+    (
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(2+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
+        ("(1+scale(r))/(r*r+scalea1*scalea2)", openmm.CustomNonbondedForce.NoCutoff, True, False, 3, 2, (("scalea", "scaleb+scalec"),), (("scaleb", 0.5, False),), ("scalec",),
+            (("scale", openmm.Continuous1DFunction, (2 + numpy.sin(numpy.linspace(0, 1, 10)), 0, 3, False)),)),
     ),
 )
 
@@ -901,8 +1000,8 @@ def test_custom_bond_force(template_data, class_data_list, class_subset):
                 force.addGlobalParameter(global_parameter_name, global_parameter_value)
                 if compute_derivative:
                     force.addEnergyParameterDerivative(global_parameter_name)
-            for particle_parameter_name in bond_parameter_names:
-                force.addPerBondParameter(particle_parameter_name)
+            for bond_parameter_name in bond_parameter_names:
+                force.addPerBondParameter(bond_parameter_name)
 
             for term_index in range(rng.integers(1, particle_count)):
                 force.addBond(*rng.choice(particle_count, 2, replace=False), rng.uniform(-10, 10, len(bond_parameter_names)))
@@ -938,8 +1037,8 @@ def test_custom_angle_force(template_data, class_data_list, class_subset):
                 force.addGlobalParameter(global_parameter_name, global_parameter_value)
                 if compute_derivative:
                     force.addEnergyParameterDerivative(global_parameter_name)
-            for particle_parameter_name in angle_parameter_names:
-                force.addPerAngleParameter(particle_parameter_name)
+            for angle_parameter_name in angle_parameter_names:
+                force.addPerAngleParameter(angle_parameter_name)
 
             for term_index in range(rng.integers(1, particle_count)):
                 force.addAngle(*rng.choice(particle_count, 3, replace=False), rng.uniform(-10, 10, len(angle_parameter_names)))
@@ -975,8 +1074,8 @@ def test_custom_torsion_force(template_data, class_data_list, class_subset):
                 force.addGlobalParameter(global_parameter_name, global_parameter_value)
                 if compute_derivative:
                     force.addEnergyParameterDerivative(global_parameter_name)
-            for particle_parameter_name in torsion_parameter_names:
-                force.addPerTorsionParameter(particle_parameter_name)
+            for torsion_parameter_name in torsion_parameter_names:
+                force.addPerTorsionParameter(torsion_parameter_name)
 
             for term_index in range(rng.integers(1, particle_count)):
                 force.addTorsion(*rng.choice(particle_count, 4, replace=False), rng.uniform(-10, 10, len(torsion_parameter_names)))
@@ -1012,8 +1111,8 @@ def test_custom_compound_bond_force(template_data, class_data_list, class_subset
                 force.addGlobalParameter(global_parameter_name, global_parameter_value)
                 if compute_derivative:
                     force.addEnergyParameterDerivative(global_parameter_name)
-            for particle_parameter_name in bond_parameter_names:
-                force.addPerBondParameter(particle_parameter_name)
+            for bond_parameter_name in bond_parameter_names:
+                force.addPerBondParameter(bond_parameter_name)
             for tabulated_function_name, tabulated_function_type, tabulated_function_args in tabulated_functions:
                 force.addTabulatedFunction(tabulated_function_name, tabulated_function_type(*tabulated_function_args))
 
@@ -1059,8 +1158,8 @@ def test_custom_centroid_bond_force(template_data, class_data_list, class_subset
                 force.addGlobalParameter(global_parameter_name, global_parameter_value)
                 if compute_derivative:
                     force.addEnergyParameterDerivative(global_parameter_name)
-            for particle_parameter_name in bond_parameter_names:
-                force.addPerBondParameter(particle_parameter_name)
+            for bond_parameter_name in bond_parameter_names:
+                force.addPerBondParameter(bond_parameter_name)
             for tabulated_function_name, tabulated_function_type, tabulated_function_args in tabulated_functions:
                 force.addTabulatedFunction(tabulated_function_name, tabulated_function_type(*tabulated_function_args))
 
@@ -1074,10 +1173,66 @@ def test_custom_centroid_bond_force(template_data, class_data_list, class_subset
     combined_system, particle_offsets = multiopenmm.stacking.stack(templates, template_indices, temperature_scales)
     help_check_combined_context(temperature_scales, templates, template_indices, combined_system, particle_offsets, rng.uniform(0, 2, (particle_offsets[-1], 3)))
 
-@pytest.mark.xfail
-def test_custom_nonbonded_force():
-    # TODO: Test CustomNonbondedForceHandler.
-    raise NotImplementedError
+@pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
+@pytest.mark.parametrize("class_data_list", HELP_CUSTOM_NONBONDED_CLASS_DATA_LIST)
+@pytest.mark.parametrize("class_subset", (False, True))
+@pytest.mark.parametrize("with_groups", (False, True))
+def test_custom_nonbonded_force(template_data, class_data_list, class_subset, with_groups):
+    rng = numpy.random.default_rng((0x2d9631bbf3c06006, help_deterministic_hash((template_data, class_data_list, class_subset, with_groups))))
+
+    template_sizes, template_indices = template_data
+    temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
+    templates = tuple(helpers_test.help_make_templates(template_sizes))
+    
+    class_data_count = len(class_data_list)
+
+    for template_index, template in enumerate(templates):
+        template.setDefaultPeriodicBoxVectors(*(7 * numpy.eye(3)))
+        particle_count = template.getNumParticles()
+        if particle_count < 2:
+            continue
+        
+        for class_data_index in rng.choice(class_data_count, rng.integers(max(1, class_data_count // 2), max(2, class_data_count)) if class_subset else class_data_count, replace=False):
+            energy_function, cut_method, uses_switch, uses_long, r_cut, r_switch, compute_parameters, global_parameters, particle_parameter_names, tabulated_functions = class_data_list[class_data_index]
+
+            force = openmm.CustomNonbondedForce(energy_function)
+            force.setNonbondedMethod(cut_method)
+            force.setUseSwitchingFunction(uses_switch)
+            force.setUseLongRangeCorrection(uses_long)
+            force.setCutoffDistance(r_cut)
+            force.setSwitchingDistance(r_switch)
+            for compute_parameter_name, compute_parameter_function in compute_parameters:
+                force.addComputedValue(compute_parameter_name, compute_parameter_function)
+            for global_parameter_name, global_parameter_value, compute_derivative in global_parameters:
+                force.addGlobalParameter(global_parameter_name, global_parameter_value)
+                if compute_derivative:
+                    force.addEnergyParameterDerivative(global_parameter_name)
+            for particle_parameter_name in particle_parameter_names:
+                force.addPerParticleParameter(particle_parameter_name)
+            for tabulated_function_name, tabulated_function_type, tabulated_function_args in tabulated_functions:
+                force.addTabulatedFunction(tabulated_function_name, tabulated_function_type(*tabulated_function_args))
+
+            for particle_index in range(particle_count):
+                force.addParticle(rng.uniform(0.5, 1.5, len(particle_parameter_names)))
+            
+            if with_groups and rng.uniform() < 0.5:
+                for group_index in range(rng.integers(2, 5)):
+                    group_indices_1 = rng.choice(particle_count, rng.integers(particle_count // 4, 3 * particle_count // 4), replace=False)
+                    group_indices_2 = rng.choice(particle_count, rng.integers(particle_count // 4, 3 * particle_count // 4), replace=False)
+                    force.addInteractionGroup(group_indices_1, group_indices_2)
+            
+            exclusions = set()
+            exclusion_count = min(rng.integers(particle_count, 2 * particle_count), particle_count * (particle_count - 1) // 4)
+            while len(exclusions) < exclusion_count:
+                exclusions.add(tuple(sorted(rng.choice(particle_count, 2, replace=False))))
+            exclusions = sorted(exclusions)
+            for exclusion_index in rng.permutation(exclusion_count):
+                force.addExclusion(*rng.permutation(exclusions[exclusion_index]))
+
+            template.addForce(force)
+    
+    combined_system, particle_offsets = multiopenmm.stacking.stack(templates, template_indices, temperature_scales)
+    help_check_combined_context(temperature_scales, templates, template_indices, combined_system, particle_offsets, rng.uniform(0, 7, (particle_offsets[-1], 3)))
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 @pytest.mark.parametrize("class_data_list", HELP_FORCE_GROUP_CLASS_DATA_LIST)
