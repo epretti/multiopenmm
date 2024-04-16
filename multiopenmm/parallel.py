@@ -413,7 +413,7 @@ class Simulation:
         -------
         array of float
             For each specified instance, its `(3, 3)` matrix of periodic box
-            vector components, in column vector form.
+            vector components, in row vector form.
 
         See also
         --------
@@ -559,9 +559,9 @@ class Simulation:
         Parameters
         ----------
         vectors : array of float
-            Periodic box vector components, in column vector form, for all or
-            each of the specified instances.  This parameter will be broadcast
-            to an appropriate shape for the instance specification.
+            Periodic box vector components, in row vector form, for all or each
+            of the specified instances.  This parameter will be broadcast to an
+            appropriate shape for the instance specification.
         indices : int, slice, array of int, or array of bool, optional
             Specification of instances.  By default, all instances will be
             selected.
@@ -812,6 +812,7 @@ class Simulation:
         if not isinstance(velocities, bool):
             raise TypeError("velocities must be a bool")
 
+        indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
         combined_systems = self.__get_combined_systems(indices)
 
         for response, system_data in zip(self.__manager._distribute(*(
@@ -825,6 +826,7 @@ class Simulation:
                 False,
                 positions,
                 velocities,
+                False,
                 False,
                 system_data["enforce_periodic"],
                 system_data["center_coordinates"],
@@ -869,6 +871,7 @@ class Simulation:
         elif not isinstance(iteration_count, int):
             raise TypeError("iteration_count must be an int or None")
         
+        indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
         combined_systems = self.__get_combined_systems(indices)
 
         for response, system_data in zip(self.__manager._distribute(*(
@@ -881,6 +884,7 @@ class Simulation:
                 None,
                 False,
                 True,
+                False,
                 False,
                 False,
                 system_data["enforce_periodic"],
@@ -904,6 +908,7 @@ class Simulation:
             selected.
         """
 
+        indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
         combined_systems = self.__get_combined_systems(indices)
 
         for response, system_data in zip(self.__manager._distribute(*(
@@ -917,6 +922,7 @@ class Simulation:
                 False,
                 False,
                 True,
+                False,
                 False,
                 system_data["enforce_periodic"],
                 system_data["center_coordinates"],
@@ -944,13 +950,22 @@ class Simulation:
             all specified instances, the kinetic energy of each.
         """
 
+        # Store non-deduplicated indices (do not call unique() yet) so that if
+        # duplicate indices are provided, duplicate results can be reported.
+        indices = self.__resolve_with_size(self.__instance_count, indices)
+
         # Save the current stack identifiers since we will require each instance
-        # to have a dedicated OpenMM system for the energy evaluation.
+        # to have a dedicated OpenMM system for the energy evaluation, and will
+        # therefore need to modify them.
         old_stacks = self.get_stacks()
 
         try:
             self.set_stacks_separate()
-            combined_systems = self.__get_combined_systems(indices)
+
+            # Now call unique() on the indices to ensure that each OpenMM system
+            # created contains exactly one instance even if duplicate indices
+            # are provided.
+            combined_systems = self.__get_combined_systems(numpy.unique(indices))
 
             potential_energies = {}
             kinetic_energies = {}
@@ -967,6 +982,7 @@ class Simulation:
                     False,
                     False,
                     True,
+                    False,
                     system_data["enforce_periodic"],
                     system_data["center_coordinates"],
                 )
@@ -981,15 +997,16 @@ class Simulation:
                 kinetic_energies[stack_index] = kinetic_energy_out
 
         finally:
+            # Ensure that an exception being raised does not leave the modified
+            # stack identifiers in place.
             self.set_stacks(old_stacks)
 
-        indices = self.__resolve_with_size(self.__instance_count, indices)
         return (
             numpy.array([potential_energies[index] for index in indices]),
             numpy.array([kinetic_energies[index] for index in indices]),
         )
 
-    def integrate(self, step_count, write_start=None, write_stop=None, write_step=None, indices=None):
+    def integrate(self, step_count, write_start=None, write_stop=None, write_step=None, write_energy=False, broadcast_energies=False, indices=None):
         """
         Runs molecular dynamics for the specified instances, and updates
         periodic box vector components, position coordinates, and velocity
@@ -1006,6 +1023,13 @@ class Simulation:
         write_step : int, optional
             The interval in steps at which to write positions after the first
             step at which positions have been written.
+        write_energy : bool, optional
+            Whether or not to write potential energies with positions.
+        broadcast_energies : bool, optional
+            Whether or not to return potential energies evaluated by
+            broadcasting the positions of each instance in turn to all
+            instances.  This is only particularly meaningful for replica
+            exchange when all instances have identical templates.
         indices : int, slice, array of int, or array of bool, optional
             Specification of instances.  By default, all instances will be
             selected.
@@ -1018,13 +1042,9 @@ class Simulation:
 
         Returns
         -------
-        tuple(str), array of int, array of int, array of int, array of int
-            First, an array of paths to which trajectory data has been written.
-            Then, arrays of indices into the array of paths, byte offsets into
-            trajectory files, particle offsets into
-            For all specified instances, the potential energy of each, and for
-            all specified instances, the kinetic energy of each.
-
+        IntegrationResult or (IntegrationResult, array of float)
+            An object containing information about positions written, and, if
+            ``broadcast_energies`` is ``True``, an array of potential energies.
         """
 
         if not isinstance(step_count, int):
@@ -1050,14 +1070,24 @@ class Simulation:
             if write_step < 1:
                 raise ValueError("write_step must be positive")
 
+        if not isinstance(write_energy, bool):
+            raise TypeError("write_energy must be a bool")
+
         if write_start is None and write_stop is None and write_step is None:
             write_start = write_stop = 0
             write_step = 1
 
+        # Store non-deduplicated indices so that if duplicate indices are
+        # provided and broadcast_energies is set, duplicate results can be
+        # reported accurately.
         indices = self.__resolve_with_size(self.__instance_count, indices)
-        combined_systems = self.__get_combined_systems(indices)
+        indices_unique = numpy.unique(indices)
+        combined_systems = self.__get_combined_systems(indices_unique)
 
-        integrate_results = []
+        integration_results = []
+
+        if broadcast_energies:
+            potential_energies = {}
 
         for response, system_data in zip(self.__manager._distribute(*(
             support.Arguments(
@@ -1071,27 +1101,33 @@ class Simulation:
                 True,
                 True,
                 False,
+                broadcast_energies,
                 system_data["enforce_periodic"],
                 system_data["center_coordinates"],
-                (simulation.Command.INTEGRATE, support.Arguments(step_count, write_start, write_stop, write_step)),
+                (simulation.Command.INTEGRATE, support.Arguments(step_count, write_start, write_stop, write_step, write_energy)),
             )
             for stack, system_data in combined_systems.items())), combined_systems.values()):
 
-            (integrate_result,), (vectors_out, positions_out, velocities_out) = response()
+            (integration_result,), (vectors_out, positions_out, velocities_out, *broadcast_out) = response()
             self.set_vectors(vectors_out, system_data["indices"])
             self.set_positions(positions_out, system_data["indices"])
             self.set_velocities(velocities_out, system_data["indices"])
-            integrate_results.append(integrate_result)
+            integration_results.append(integration_result)
+
+            if broadcast_energies:
+                broadcast_energy_scale = 1 / numpy.sum(1 / system_data["temperature_scales"])
+                for instance_index, broadcast_energy in zip(system_data["indices"], *broadcast_out, strict=True):
+                    potential_energies[instance_index] = broadcast_energy * broadcast_energy_scale
 
         expected_frame_count = len(range(step_count)[write_start:write_stop:write_step])
-        path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integrate_results)))}
+        path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integration_results)))}
 
         path_indices = {}
         byte_offsets = {}
         particle_indices_start = {}
         particle_indices_end = {}
 
-        for system_data, (path, byte_offset, frame_count, particle_offsets) in zip(combined_systems.values(), integrate_results):
+        for system_data, (path, byte_offset, frame_count, particle_offsets) in zip(combined_systems.values(), integration_results):
             if frame_count != expected_frame_count:
                 raise RuntimeError("unexpected number of frames")
 
@@ -1105,13 +1141,19 @@ class Simulation:
                 particle_indices_start[stack_index] = particle_index_start
                 particle_indices_end[stack_index] = particle_index_end
 
-        return IntegrateResult((
+        integration_result = IntegrationResult(
             tuple(path_table), 
-            numpy.array([path_indices[index] for index in indices], dtype=int),
-            numpy.array([byte_offsets[index] for index in indices], dtype=int),
-            numpy.array([particle_indices_start[index] for index in indices], dtype=int),
-            numpy.array([particle_indices_end[index] for index in indices], dtype=int),
-        ))
+            indices_unique,
+            expected_frame_count,
+            numpy.array([path_indices[index] for index in indices_unique], dtype=int),
+            numpy.array([byte_offsets[index] for index in indices_unique], dtype=int),
+            numpy.array([particle_indices_start[index] for index in indices_unique], dtype=int),
+            numpy.array([particle_indices_end[index] for index in indices_unique], dtype=int),
+        )
+        if broadcast_energies:
+            return integration_result, numpy.array([potential_energies[index] for index in indices])
+        else:
+            return integration_result
 
     def __update_instance_data(self):
         # Updates tables used to slice arrays containing per-particle
@@ -1191,13 +1233,12 @@ class Simulation:
         array[indices] = numpy.broadcast_to(values, (indices.size, *array.shape[1:]))
 
     def __get_combined_systems(self, indices):
-        # Creates combined OpenMM systems based on the current parallel
-        # simulation state.
+        # Creates combined OpenMM systems for the instances corresponding to
+        # each of the unique indices in the given array based on the current
+        # parallel simulation state.
 
-        # Process the specification of instances to create combined OpenMM
-        # systems from, and retrieve the stack identifiers indicating the stacks
-        # that actually need to have combined systems created from them.
-        indices = self.__resolve_with_size(self.__instance_count, indices)
+        # Retrieve the stack identifiers indicating the stacks that actually
+        # need to have combined systems created from them.
         stack_set = numpy.unique(self.__stacks[indices])
 
         # Check the selected ensemble type.
@@ -1254,7 +1295,14 @@ class Simulation:
             # that the scale factors associated with individual instances will
             # be close to 1.
             temperatures = self.__property_values["temperature"][indices][mask]
-            run_temperature = scipy.stats.gmean(temperatures)
+            if temperatures.size == 1:
+                # If the combined system contains exactly one instance, ensure
+                # that the run temperature will be exactly equal to the instance
+                # temperature (the scipy.stats.gmean implementation does not
+                # guarantee this due to internal roundoff: exp(log(x)) != x).
+                run_temperature, = temperatures
+            else:
+                run_temperature = scipy.stats.gmean(temperatures)
 
             # Retrieve the thermostat characteristic time and calculate the
             # friction coefficient or collision frequency for the thermostat.
@@ -1265,10 +1313,20 @@ class Simulation:
             friction = 1 / (step_length * thermostat_steps)
 
             set_tolerance_method = ("setConstraintTolerance", support.Arguments(constraint_tolerance))
+            runtime_data = []
             forces = []
 
             match self.__ensemble.thermostat:
                 case Thermostat.ANDERSEN:
+                    # Indicate that a default temperature is to be used when
+                    # creating the thermostat and that the temperature is to be
+                    # updated as a context variable.
+
+                    runtime_data.append((
+                        simulation.RuntimeUpdateObject.CONTEXT,
+                        "setParameter",
+                        support.Arguments(openmm.AndersenThermostat.Temperature(), run_temperature),
+                    ))
                     integrator_data = simulation.ObjectData(
                         openmm.VerletIntegrator,
                         support.Arguments(step_length),
@@ -1277,22 +1335,40 @@ class Simulation:
                     )
                     forces.append(simulation.ObjectData(
                         openmm.AndersenThermostat,
-                        support.Arguments(run_temperature, friction),
+                        support.Arguments(1.0, friction),
                         True,
                     ))
 
                 case Thermostat.LANGEVIN:
+                    # Indicate that a default temperature is to be used when
+                    # creating the integrator and that the temperature is to be
+                    # updated directly on the integrator.
+
+                    runtime_data.append((
+                        simulation.RuntimeUpdateObject.INTEGRATOR,
+                        "setTemperature",
+                        support.Arguments(run_temperature),
+                    ))
                     integrator_data = simulation.ObjectData(
                         openmm.LangevinMiddleIntegrator,
-                        support.Arguments(run_temperature, friction, step_length),
+                        support.Arguments(1.0, friction, step_length),
                         True,
                         set_tolerance_method,
                     )
 
                 case Thermostat.BROWNIAN:
+                    # Indicate that a default temperature is to be used when
+                    # creating the integrator and that the temperature is to be
+                    # updated directly on the integrator.
+
+                    runtime_data.append((
+                        simulation.RuntimeUpdateObject.INTEGRATOR,
+                        "setTemperature",
+                        support.Arguments(run_temperature),
+                    ))
                     integrator_data = simulation.ObjectData(
                         openmm.BrownianIntegrator,
-                        support.Arguments(run_temperature, friction, step_length),
+                        support.Arguments(1.0, friction, step_length),
                         True,
                         set_tolerance_method,
                     )
@@ -1309,9 +1385,24 @@ class Simulation:
 
                 match self.__ensemble.barostat:
                     case Barostat.MC_ISOTROPIC:
+                        # Indicate that a default pressure and temperature are
+                        # to be used when creating the barostat and that the
+                        # temperature and pressure are to be updated as context
+                        # variables.
+
+                        runtime_data.append((
+                            simulation.RuntimeUpdateObject.CONTEXT,
+                            "setParameter",
+                            support.Arguments(openmm.MonteCarloBarostat.Pressure(), pressure),
+                        ))
+                        runtime_data.append((
+                            simulation.RuntimeUpdateObject.CONTEXT,
+                            "setParameter",
+                            support.Arguments(openmm.MonteCarloBarostat.Temperature(), temperature),
+                        ))
                         forces.append(simulation.ObjectData(
                             openmm.MonteCarloBarostat,
-                            support.Arguments(pressure, run_temperature, barostat_steps),
+                            support.Arguments(1.0, 1.0, barostat_steps),
                             True,
                         ))
 
@@ -1320,13 +1411,15 @@ class Simulation:
            
             # For each combined system, return a dictionary containing the
             # system and information about it.
+            temperature_scales = temperatures / run_temperature
             combined_systems[stack] = dict(
                 center_coordinates=center_coordinates[mask],
-                context_data=simulation.ContextData(integrator_data, *forces),
+                context_data=simulation.ContextData(runtime_data, integrator_data, *forces),
                 enforce_periodic=enforce_periodic[mask],
                 indices=indices[mask],
                 run_temperature=run_temperature,
-                system_path=self.__get_combined_system(self.__template_indices[indices][mask], temperatures / run_temperature),
+                system_path=self.__get_combined_system(self.__template_indices[indices][mask], temperature_scales),
+                temperature_scales=temperature_scales,
                 vectors=vectors,
             )
 
@@ -1531,13 +1624,42 @@ class IsothermalIsobaricEnsemble(Ensemble):
             "barostat_steps": DEFAULT_BAROSTAT_STEPS,
         }
 
-class IntegrateResult:
+class IntegrationResult:
     """
-    Holds information specifying how trajectory frames were written during a
-    call to :py:meth:`Simulation.integrate`.
+    Holds details of trajectory frames written during calls to
+    :py:meth:`multiopenmm.Simulation.integrate`.
     """
 
-    __slots__ = ("__path_table", "__path_indices", "__byte_offsets", "__particle_indices_start", "__particle_indices_end")
+    __slots__ = ("__path_table", "__indices", "__frame_count", "__path_indices",
+        "__byte_offsets", "__particle_indices_start", "__particle_indices_end")
 
-    def __init__(self, data):
-        self.__path_table, self.__path_indices, self.__byte_offsets, self.__particle_indices_start, self.__particle_indices_end = data
+    def __init__(self, *data):
+        self._set_data(*data)
+
+    def __getstate__(self):
+        return self._get_data()
+
+    def __setstate__(self, state):
+        self._set_data(*state)
+
+    def _get_data(self):
+        return (
+            self.__path_table,
+            self.__indices,
+            self.__frame_count,
+            self.__path_indices,
+            self.__byte_offsets,
+            self.__particle_indices_start,
+            self.__particle_indices_end,
+        )
+
+    def _set_data(self, *data):
+        (
+            self.__path_table,
+            self.__indices,
+            self.__frame_count,
+            self.__path_indices,
+            self.__byte_offsets,
+            self.__particle_indices_start,
+            self.__particle_indices_end,
+        ) = data

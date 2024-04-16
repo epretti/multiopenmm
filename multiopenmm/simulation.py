@@ -44,6 +44,15 @@ class Command(enum.Enum):
     # Performs time integration.
     INTEGRATE = enum.auto()
 
+class RuntimeUpdateObject(enum.Enum):
+    # Specifies an object to perform an action on.
+
+    # Performs an action on a context.
+    CONTEXT = enum.auto()
+
+    # Performs an action on an integrator.
+    INTEGRATOR = enum.auto()
+
 class ObjectData:
     # Contains instructions for creating an OpenMM object.
 
@@ -55,6 +64,10 @@ class ObjectData:
         self.__initializer_arguments = initializer_arguments
         self.__set_random_seed = set_random_seed
         self.__methods = methods
+
+    def __repr__(self):
+        repr_list = ", ".join(map(repr, (self.__initializer, self.__initializer_arguments, self.__set_random_seed) + self.__methods))
+        return f"ObjectData({repr_list})"
 
     def __eq__(self, other):
         if type(self) is not type(other):
@@ -76,11 +89,16 @@ class ContextData:
     # Contains instructions for adding forces to an OpenMM system and creating
     # an integrator and a context.
 
-    __slots__ = ("__integrator_data", "__forces")
+    __slots__ = ("__runtime_data", "__integrator_data", "__forces")
 
-    def __init__(self, integrator_data, *forces):
+    def __init__(self, runtime_data, integrator_data, *forces):
+        self.__runtime_data = runtime_data
         self.__integrator_data = integrator_data
         self.__forces = forces
+
+    def __repr__(self):
+        repr_list = ", ".join(map(repr, (self.__runtime_data, self.__integrator_data) + self.__forces))
+        return f"ContextData({repr_list})"
 
     def __eq__(self, other):
         if type(self) is not type(other):
@@ -100,7 +118,21 @@ class ContextData:
         else:
             context = openmm.Context(system, integrator, platform_data.platform_name, platform_data.platform_properties)
 
-        return integrator, context
+        return context
+
+    @property
+    def runtime_data(self):
+        # Some data that can be squirrelled away in the ContextData object and
+        # modified without causing the ContextData object to compare unequal to
+        # an otherwise identical ContextData object.  This is useful to be able
+        # to update the simulation temperature and pressure without triggering a
+        # reconstruction of an entire context from scratch.
+
+        return self.__runtime_data
+
+    @runtime_data.setter
+    def runtime_data(self, runtime_data):
+        self.__runtime_data = runtime_data
 
 class PlatformData:
     """
@@ -130,7 +162,7 @@ class PlatformData:
             if not isinstance(platform_properties, dict):
                 raise TypeError("platform_properties must be a dict")
 
-            for property_name, property_value in platform_properties:
+            for property_name, property_value in platform_properties.items():
                 if not isinstance(property_name, str):
                     raise TypeError("platform property name must be a str")
                 if not isinstance(property_value, str):
@@ -140,6 +172,9 @@ class PlatformData:
 
         self.__platform_name = platform_name
         self.__platform_properties = platform_properties
+
+    def __repr__(self):
+        return f"PlatformData({self.__platform_name!r}, {self.__platform_properties!r})"
 
     def __eq__(self, other):
         if type(self) is not type(other):
@@ -166,42 +201,46 @@ class Client:
     # Maintains client state and executes instructions for performing
     # simulations.
 
-    __slots__ = ("__system_path", "__context_data", "__integrator", "__context",
-        "__particle_offsets", "__particle_masses", "__rng", "__traj_file")
+    __slots__ = ("__system_path", "__context_data", "__platform_data",
+        "__runtime_data", "__context", "__particle_offsets",
+        "__particle_masses", "__rng", "__traj_file")
 
     def __init__(self):
         self.__system_path = None
         self.__context_data = None
-        self.__integrator = None
+        self.__platform_data = None
+        self.__runtime_data = None
         self.__context = None
         self.__particle_offsets = None
         self.__particle_masses = None
         self.__rng = None
         self.__traj_file = None
 
-
     def execute(self, system_path, context_data, rng,
             vectors_in, positions_in, velocities_in,
-            vectors_out, positions_out, velocities_out, energies_out,
+            vectors_out, positions_out, velocities_out, energies_out, broadcast_out,
             enforce_periodic, center_coordinates,
             *commands, platform_data):
 
         # Reload the system and context if necessary.
-        if self.__system_path != system_path or self.__context_data != context_data:
-            # Delete the old integrator and context.
-            del self.__integrator
+        if (self.__system_path, self.__context_data, self.__platform_data) != (system_path, context_data, platform_data):
+            # Delete the old context and all of its associated objects.
             del self.__context
 
-            # Reload the system from disk and create a new integrator and
-            # context.
+            # Reload the system from disk and create a new context.
             with gzip.open(system_path) as file:
                 system, particle_offsets = pickle.load(file)
-            integrator, context = context_data.create(system, platform_data, rng)
+            context = context_data.create(system, platform_data, rng)
 
-            # Update system- and context-associated data.
+            # Update system- and context-associated data.  Clear any stored data
+            # in the __runtime_data attribute specifying commands that were
+            # executed to change the state of the old context; since we have
+            # created a new context, we will unconditionally need to execute the
+            # latest set of specified commands on it to set up its state.
             self.__system_path = system_path
             self.__context_data = context_data
-            self.__integrator = integrator
+            self.__platform_data = platform_data
+            self.__runtime_data = None
             self.__context = context
             self.__particle_offsets = particle_offsets
             self.__particle_masses = numpy.array([
@@ -211,6 +250,27 @@ class Client:
 
         # Save the random number generator in case one is needed.
         self.__rng = rng
+
+        # Update the context if necessary.  Note that the runtime_data attribute
+        # of the ContextData class is not considered as part of an equality
+        # comparison, so even if the stored and received ContextData instances
+        # compared equal, there may still be differences in the runtime_data.
+        if self.__runtime_data != self.__context_data.runtime_data:
+            for update_object, method_name, method_arguments in self.__context_data.runtime_data:
+                match update_object:
+                    case RuntimeUpdateObject.CONTEXT:
+                        target_object = self.__context
+                    case RuntimeUpdateObject.INTEGRATOR:
+                        target_object = self.__context.getIntegrator()
+                    case _:
+                        raise RuntimeError("unrecognized RuntimeUpdateObject")
+
+                method_arguments.apply_to(getattr(target_object, method_name))
+
+            # Store the specification of the commands executed to update the
+            # state of the context so that they need not be executed again
+            # unless they change.
+            self.__runtime_data = self.__context_data.runtime_data
 
         # Update context state if given.
         if vectors_in is not None:
@@ -239,22 +299,39 @@ class Client:
         # Retrieve context state if requested.
         state_results = []
 
-        if vectors_out or positions_out or velocities_out or energies_out:
+        if vectors_out or positions_out or velocities_out or energies_out or broadcast_out:
             # Determine whether or not the first call to getState() should
-            # enforce periodic boundary conditions.
-            enforce_periodic_flag = bool(positions_out and numpy.all(enforce_periodic))
+            # enforce periodic boundary conditions.  Note that if we have the
+            # broadcast_out flag set, we want to not enforce periodic boundary
+            # conditions because we will want to evaluate and restore using
+            # unwrapped coordinates for broadcasted potential energy evaluation.
+            enforce_periodic_flag = bool(positions_out and not broadcast_out and numpy.all(enforce_periodic))
 
-            state = self.__context.getState(getPositions=positions_out, getVelocities=velocities_out, getEnergy=energies_out, enforcePeriodicBox=enforce_periodic_flag)
+            state = self.__context.getState(getPositions=positions_out or broadcast_out, getVelocities=velocities_out, getEnergy=energies_out, enforcePeriodicBox=enforce_periodic_flag)
 
         if vectors_out:
             state_results.append(state.getPeriodicBoxVectors(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system))
 
+        if positions_out or broadcast_out:
+            # The raw_positions array will never be modified and contains
+            # unwrapped coordinates unless broadcast_out is False and all
+            # instances are requesting wrapped coordinates.
+            raw_positions = state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system)
+
         if positions_out:
-            positions = state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system)
+            # The positions array may be modified by replacing the unwrapped
+            # coordinates of some instances with wrapped coordinates, so copy it
+            # from the raw_positions array.
+            positions = numpy.array(raw_positions)
 
             # Determine whether or not an extra call to getState() needs to be
-            # made to enforce periodic boundary conditions (the case if some
-            # instances are requesting wrapped coordinates and others are not).
+            # made to enforce periodic boundary conditions (the case if
+            # broadcast_out is set and some or all instances are requesting
+            # wrapped coordinates, or otherwise, some instances are requesting
+            # wrapped coordinates and others are not: in either case,
+            # enforce_periodic_flag will have been set to False, so we know for
+            # sure that we will need wrapped coordinates for at least some
+            # instances).
             get_wrapped_state_flag = bool(not enforce_periodic_flag and numpy.any(enforce_periodic))
 
             # See if we need to get wrapped coordinates in addition to unwrapped
@@ -286,13 +363,42 @@ class Client:
             state_results.append(state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system))
             state_results.append(state.getKineticEnergy().value_in_unit_system(openmm.unit.md_unit_system))
 
+        if broadcast_out:
+            broadcast_energies = []
+            
+            # For each instance, copy positions to all other instances and
+            # evaluate the system energy.  If instances have different sizes,
+            # this will either select only the first positions from the source
+            # instance, or leave extra positions at the destination instance.
+            # Normally, this will be done with identical instances, so no such
+            # mismatches will occur; note in this case that if the unscaled
+            # energy of an instance is desired, it is necessary to divide the
+            # returned energies by the sum of the scale factors for the
+            # instances.
+            for evaluate_instance_index, (evaluate_start_index, evaluate_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
+                evaluate_positions = numpy.array(raw_positions)
+                for source_instance_index, (source_start_index, source_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
+                    if source_instance_index == evaluate_instance_index:
+                        continue
+                    length = min(evaluate_end_index - evaluate_start_index, source_end_index - source_start_index)
+                    evaluate_positions[evaluate_start_index:evaluate_start_index + length] = evaluate_positions[source_start_index:source_start_index + length]
+                self.__context.setPositions(evaluate_positions)
+                broadcast_energies.append(self.__context.getState(getEnergy=True).getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system))
+
+            # Restore the original positions.
+            self.__context.setPositions(raw_positions)
+
+            state_results.append(numpy.array(broadcast_energies))
+
         return command_results, state_results
 
     def apply_constraints(self, positions, velocities):
+        integrator = self.__context.getIntegrator()
+
         if positions:
-            self.__context.applyConstraints(self.__integrator.getConstraintTolerance())
+            self.__context.applyConstraints(integrator.getConstraintTolerance())
         if velocities:
-            self.__context.applyVelocityConstraints(self.__integrator.getConstraintTolerance())
+            self.__context.applyVelocityConstraints(integrator.getConstraintTolerance())
 
     def minimize(self, tolerance, iteration_count):
         openmm.LocalEnergyMinimizer.minimize(self.__context, tolerance, iteration_count)
@@ -300,7 +406,9 @@ class Client:
     def maxwell_boltzmann(self, run_temperature):
         self.__context.setVelocitiesToTemperature(run_temperature, support.get_seed(self.__rng))
 
-    def integrate(self, step_count, write_start, write_stop, write_step):
+    def integrate(self, step_count, write_start, write_stop, write_step, write_energy):
+        integrator = self.__context.getIntegrator()
+
         step_index = 0
         write_pointer = None
         write_count = 0
@@ -310,7 +418,7 @@ class Client:
             # next write, and how many steps we need to simulate to get there.
             integrate_count = write_index - step_index
             if integrate_count:
-                self.__integrator.step(integrate_count)
+                integrator.step(integrate_count)
             step_index += integrate_count
 
             # If this is the first write, make sure that we have a trajectory
@@ -318,21 +426,18 @@ class Client:
             # which the writing is starting.
             if not write_count:
                 if self.__traj_file is None:
-                    self.__traj_file = tempfile.NamedTemporaryFile(prefix="multiopenmm_traj_", suffix=".bin", dir=support.get_scratch_directory(), delete=False)
+                    self.__traj_file = tempfile.NamedTemporaryFile(prefix="multiopenmm_data_", suffix=".mmmraw", dir=support.get_scratch_directory(), delete=False)
+                    support.RawFileIO.write_header(self.__traj_file)
+                    self.__traj_file.flush()
                 write_pointer = self.__traj_file.tell()
 
             # Retrieve vectors and positions to write to the trajectory file.
-            state = self.__context.getState(getPositions=True)
-            vectors = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system).astype(numpy.float64)
-            positions = state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system).astype(numpy.float64)
-
-            # Write the number of particles N as a uint64, followed by a 3-by-3
-            # matrix of float64 values in C order containing periodic box vector
-            # components, followed by an N-by-3 matrix of float64 values in C
-            # order containing position coordinates.
-            self.__traj_file.write(positions.shape[0].to_bytes(8, byteorder="little"))
-            self.__traj_file.write(vectors.tobytes())
-            self.__traj_file.write(positions.tobytes())
+            state = self.__context.getState(getPositions=True, getEnergy=write_energy)
+            support.RawFileIO.write_frame(self.__traj_file,
+                vectors=state.getPeriodicBoxVectors(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system),
+                positions=state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system),
+                energy=state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system) if write_energy else None,
+            )
 
             write_count += 1
 
@@ -344,6 +449,6 @@ class Client:
         # Finish if we have additional steps to simulate after the last write.
         integrate_count = step_count - step_index
         if integrate_count:
-            self.__integrator.step(integrate_count)
+            integrator.step(integrate_count)
 
         return self.__traj_file.name, write_pointer, write_count, self.__particle_offsets

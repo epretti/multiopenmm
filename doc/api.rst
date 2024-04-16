@@ -46,6 +46,33 @@ Default values
 Running and restarting
 ----------------------
 
+Low-level trajectory exporting
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: multiopenmm.IntegrationResult
+   :members:
+
+.. autofunction:: multiopenmm.export.export
+
+.. autofunction:: multiopenmm.export.delete_results
+
+.. autoclass:: multiopenmm.export.Exporter
+   :members:
+
+.. autoclass:: multiopenmm.DCDExporter
+   :members:
+   :show-inheritance:
+
+.. autoclass:: multiopenmm.TextEnergyExporter
+   :members:
+   :show-inheritance:
+
+Replica exchange run management
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Automatic restart management
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 Task management
 ---------------
 

@@ -20,7 +20,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import numpy
 import os
+import pickle
+import struct
+import zlib
 
 class MultiOpenMMError(Exception):
     """
@@ -44,6 +48,10 @@ class Arguments:
     def __init__(self, /, *args, **kwargs):
         self.__args = args
         self.__kwargs = kwargs
+
+    def __repr__(self):
+        repr_list = ", ".join([repr(arg) for arg in self.__args] + [f"{kw}={arg!r}" for kw, arg in self.__kwargs.items()])
+        return f"Arguments({repr_list})"
 
     @property
     def args(self):
@@ -111,3 +119,152 @@ def get_seed(rng):
     # by OpenMM as an instruction to choose a seed non-deterministically.
 
     return rng.integers(1, 0x80000000)
+
+def read_exactly(file, byte_count):
+    # Reads an exactly specified number of bytes from a file, raising an error
+    # if the requested number of bytes could not be read.
+
+    result = file.read(byte_count)
+    if len(result) != byte_count:
+        raise MultiOpenMMError("premature end of file encountered")
+    return result
+
+class RawFileIO:
+    # Handles reading and writing raw trajectory files.  The raw trajectory file
+    # format is designed as a temporary format for local internal use only;
+    # thus, it is not designed for portability across machine architectures or
+    # installations of MultiOpenMM and may change incompatibly without notice
+    # across versions of MultiOpenMM.  Do not rely on the constancy of the
+    # details of the raw trajectory file format!
+
+    # The header written at the start of raw trajectory files.
+    HEADER = b"MultiOpenMM raw trajectory file\x00"
+
+    # The type to use for writing floating-point values to raw trajectory files.
+    FLOATING_TYPE = numpy.double
+    
+    # The number of bytes occupied by a floating-point value in a raw trajectory
+    # file.
+    FLOATING_BYTE_COUNT = numpy.dtype(FLOATING_TYPE).itemsize
+
+    # The format to use for writing integer values to raw trajectory files.
+    INTEGER_FORMAT = "@N"
+
+    # The number of bytes occupied by an integer value in a raw trajectory file.
+    INTEGER_BYTE_COUNT = struct.calcsize(INTEGER_FORMAT)
+
+    @classmethod
+    def write_header(cls, file):
+        # Writes a header to a raw trajectory file.  The header should be
+        # written once to the start of a raw trajectory file.
+        
+        file.write(cls.HEADER)
+
+    @classmethod
+    def read_header(cls, file):
+        # Reads and checks the header from the start of a raw trajectory file.
+
+        if file.read(len(cls.HEADER)) != cls.HEADER:
+            raise MultiOpenMMError("invalid header in raw trajectory file")
+
+    @classmethod
+    def write_frame(cls, file, vectors=None, positions=None, energy=None):
+        # Writes a frame of data to a raw trajectory file.  vectors should be
+        # None or a 3-by-3 NumPy array.  positions should be None or an N-by-3
+        # NumPy array.  energy should be None or a scalar.
+
+        write_vectors = vectors is not None
+        write_positions = positions is not None
+        write_energy = energy is not None
+
+        frame_flags = int(write_vectors) | int(write_positions) << 1 | int(write_energy) << 2
+        file.write(bytes((frame_flags,)))
+
+        if write_vectors:
+            file.write(vectors.astype(cls.FLOATING_TYPE).tobytes())
+
+        if write_positions:
+            file.write(struct.pack(cls.INTEGER_FORMAT, positions.shape[0]))
+            file.write(positions.astype(cls.FLOATING_TYPE).tobytes())
+
+        if write_energy:
+            file.write(numpy.array(energy, dtype=cls.FLOATING_TYPE).tobytes())
+
+    @classmethod
+    def read_frame(cls, file):
+        # Reads a frame of data from a raw trajectory file.
+
+        frame_flags, = read_exactly(file, 1)
+        if frame_flags >> 3:
+            raise MultiOpenMMError("unknown frame flags in raw trajectory file")
+
+        if frame_flags & 1: # read_vectors
+            vectors = numpy.frombuffer(read_exactly(file, 9 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(3, 3)
+        else:
+            vectors = None
+
+        if frame_flags >> 1 & 1: # read_positions
+            particle_count, = struct.unpack(cls.INTEGER_FORMAT, read_exactly(file, cls.INTEGER_BYTE_COUNT))
+            positions = numpy.frombuffer(read_exactly(file, particle_count * 3 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(particle_count, 3)
+        else:
+            positions = None
+
+        if frame_flags >> 2 & 1: # read_energy
+            energy, = numpy.frombuffer(read_exactly(file, cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE)
+        else:
+            energy = None
+        
+        return vectors, positions, energy
+
+class ResultFileIO:
+    # Handles reading and writing integration result files.  The integration
+    # result file format is designed as a temporary format for local internal
+    # use only; thus, it is not designed for portability across machine
+    # architectures or installations of MultiOpenMM and may change incompatibly
+    # without notice across versions of MultiOpenMM.  Do not rely on the
+    # constancy of the details of the integration result file format.
+    
+    # The header written at the start of integration result files.
+    HEADER = b"MultiOpenMM integration results\x00"
+    
+    # The format to use for writing integer values to integration result files.
+    INTEGER_FORMAT = "@N"
+
+    # The number of bytes occupied by an integer value in an integration result
+    # file.
+    INTEGER_BYTE_COUNT = struct.calcsize(INTEGER_FORMAT)
+
+    # The value of the level argument to provide to zlib.
+    ZLIB_LEVEL = zlib.Z_BEST_COMPRESSION
+
+    # The value of the wbits argument to provide to zlib.
+    ZLIB_WBITS = -zlib.MAX_WBITS
+
+    @classmethod
+    def write_header(cls, file):
+        # Writes a header to a raw trajectory file.  The header should be
+        # written once to the start of a raw trajectory file.
+        
+        file.write(cls.HEADER)
+
+    @classmethod
+    def read_header(cls, file):
+        # Reads and checks the header from the start of a raw trajectory file.
+
+        if file.read(len(cls.HEADER)) != cls.HEADER:
+            raise MultiOpenMMError("invalid header in raw trajectory file")
+
+    @classmethod
+    def write_result(cls, file, integration_result):
+        # Writes an integration result to an integration result file.
+
+        data = zlib.compress(pickle.dumps(integration_result), level=cls.ZLIB_LEVEL, wbits=cls.ZLIB_WBITS)
+        file.write(struct.pack(cls.INTEGER_FORMAT, len(data)))
+        file.write(data)
+
+    @classmethod
+    def read_result(cls, file):
+        # Reads an integration result from an integration result file.
+
+        byte_count, = struct.unpack(cls.INTEGER_FORMAT, read_exactly(file, cls.INTEGER_BYTE_COUNT))
+        return pickle.loads(zlib.decompress(read_exactly(file, byte_count), wbits=cls.ZLIB_WBITS))
