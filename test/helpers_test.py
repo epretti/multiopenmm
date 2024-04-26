@@ -20,12 +20,21 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import hashlib
 import numpy
 import openmm
+import pickle
 
 def help_check_equal(array_1, array_2):
     assert array_1.shape == array_2.shape
     assert numpy.all(array_1 == array_2)
+
+def help_check_equal_none(array_1, array_2):
+    if array_1 is None and array_2 is None:
+        return
+    assert array_1 is not None
+    assert array_2 is not None
+    help_check_equal(array_1, array_2)
 
 def help_make_templates(template_sizes=None, *, override=None):
     if template_sizes is None:
@@ -36,3 +45,6 @@ def help_make_templates(template_sizes=None, *, override=None):
         for particle_index in range(template_size):
             template.addParticle(1.0)
         yield template
+
+def help_deterministic_hash(tuples):
+    return int.from_bytes(hashlib.sha3_512(pickle.dumps(tuples)).digest(), byteorder="little")

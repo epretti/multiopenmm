@@ -145,11 +145,12 @@ class PlatformData:
         The name of the platform to use when creating an OpenMM context.  This
         must be the name of one of the platforms that can be returned by
         :py:meth:`openmm.openmm.Platform.getPlatform`.
-    platform_properties : dict(str, str)
+    platform_properties : dict(str, str), optional
         Name-value pairs specifying platform-specific properties that should be
         set.  Each property name must be one of the names returned by
         :py:meth:`openmm.openmm.Platform.getPropertyNames` for the platform
-        specified by ``platform_name``.
+        specified by ``platform_name``.  If omitted, no platform-specific
+        properties will be stored.
     """
 
     __slots__ = ("__platform_name", "__platform_properties")
@@ -157,8 +158,11 @@ class PlatformData:
     def __init__(self, platform_name, platform_properties=None):
         if not isinstance(platform_name, str):
             raise TypeError("platform_name must be a str")
+        platform_name = str(platform_name)
 
-        if platform_properties is not None:
+        if platform_properties is None:
+            platform_properties = {}
+        else:
             if not isinstance(platform_properties, dict):
                 raise TypeError("platform_properties must be a dict")
 
@@ -168,7 +172,7 @@ class PlatformData:
                 if not isinstance(property_value, str):
                     raise TypeError("platform property value must be a str")
 
-            platform_properties = dict(platform_properties)
+            platform_properties = {str(property_name): str(property_value) for property_name, property_value in platform_properties.items()}
 
         self.__platform_name = platform_name
         self.__platform_properties = platform_properties

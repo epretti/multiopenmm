@@ -46,8 +46,8 @@ Default values
 Running and restarting
 ----------------------
 
-Low-level trajectory exporting
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Manual trajectory exporting
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. autoclass:: multiopenmm.IntegrationResult
    :members:
@@ -69,6 +69,20 @@ Low-level trajectory exporting
 
 Replica exchange run management
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: multiopenmm.parallel.ExchangePairGenerator
+   :members:
+
+.. autoclass:: multiopenmm.RandomAdjacentExchangePairGenerator
+   :members:
+   :show-inheritance:
+
+.. autoclass:: multiopenmm.parallel.AcceptanceCriterion
+   :members:
+
+.. autoclass:: multiopenmm.MetropolisAcceptanceCriterion
+   :members:
+   :show-inheritance:
 
 Automatic restart management
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

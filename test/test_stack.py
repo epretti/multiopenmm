@@ -424,9 +424,6 @@ def help_check_combined_context(temperature_scales, templates, template_indices,
     for derivative in sorted(derivatives_wanted):
         assert derivatives[derivative] == pytest.approx(sum(instance_derivatives.get(derivative, 0) for instance_derivatives in reference_derivatives))
 
-def help_deterministic_hash(tuples):
-    return int.from_bytes(hashlib.sha3_512(pickle.dumps(tuples)).digest(), byteorder="little")
-
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES)
 @pytest.mark.filterwarnings("ignore:.*No templates in use.*:multiopenmm.MultiOpenMMWarning")
 def test_stack(template_data):
@@ -521,7 +518,7 @@ def test_stack_vectors_mismatch(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_stack_particles(template_data):
-    rng = numpy.random.default_rng((0xd24be100306bbf39, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0xd24be100306bbf39, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -542,7 +539,7 @@ def test_stack_particles(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_stack_constraints(template_data):
-    rng = numpy.random.default_rng((0xaf4d11387d01de23, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0xaf4d11387d01de23, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -566,7 +563,7 @@ def test_stack_constraints(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_stack_virtual_sites(template_data):
-    rng = numpy.random.default_rng((0xaa985a186f5f6ec9, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0xaa985a186f5f6ec9, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -597,7 +594,7 @@ def test_stack_virtual_sites(template_data):
     
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_two_particle_average_site(template_data):
-    rng = numpy.random.default_rng((0x4cf82905e9f42d53, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0x4cf82905e9f42d53, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -638,7 +635,7 @@ def test_two_particle_average_site(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_three_particle_average_site(template_data):
-    rng = numpy.random.default_rng((0x79b39c159ecde9fb, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0x79b39c159ecde9fb, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -681,7 +678,7 @@ def test_three_particle_average_site(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_out_of_plane_site(template_data):
-    rng = numpy.random.default_rng((0x2cc7b4bf9ab3f3b2, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0x2cc7b4bf9ab3f3b2, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -724,7 +721,7 @@ def test_out_of_plane_site(template_data):
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)
 def test_local_coordinates_site(template_data):
-    rng = numpy.random.default_rng((0x3dff101f523c9215, help_deterministic_hash(template_data)))
+    rng = numpy.random.default_rng((0x3dff101f523c9215, helpers_test.help_deterministic_hash(template_data)))
 
     template_sizes, template_indices = template_data
     templates = tuple(helpers_test.help_make_templates(template_sizes))
@@ -775,7 +772,7 @@ def test_local_coordinates_site(template_data):
 @pytest.mark.parametrize("class_data_list", HELP_PBC_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_harmonic_bond_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0xeb51a94a1d59c3d4, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0xeb51a94a1d59c3d4, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -806,7 +803,7 @@ def test_harmonic_bond_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_PBC_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_harmonic_angle_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0xb7e5b9e3fe84e1f2, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0xb7e5b9e3fe84e1f2, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -837,7 +834,7 @@ def test_harmonic_angle_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_PBC_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_periodic_torsion_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x52c9ecbfd22315c8, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x52c9ecbfd22315c8, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -868,7 +865,7 @@ def test_periodic_torsion_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_PBC_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_rb_torsion_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x15e62b53d43795d8, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x15e62b53d43795d8, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -900,7 +897,7 @@ def test_rb_torsion_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_subset", (False, True))
 @pytest.mark.parametrize("share_map_data", (False, True))
 def test_cmap_torsion_force(template_data, class_data_list, class_subset, share_map_data):
-    rng = numpy.random.default_rng((0xc2b1651b66b9d679, help_deterministic_hash((template_data, class_data_list, class_subset, share_map_data))))
+    rng = numpy.random.default_rng((0xc2b1651b66b9d679, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset, share_map_data))))
 
     template_sizes, template_indices = template_data
     if share_map_data:
@@ -944,7 +941,7 @@ def test_cmap_torsion_force(template_data, class_data_list, class_subset, share_
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_EXTERNAL_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_external_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x1301ef7b1fa777da, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x1301ef7b1fa777da, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -978,7 +975,7 @@ def test_custom_external_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_BOND_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_bond_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0xa9952d163503c1d4, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0xa9952d163503c1d4, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1015,7 +1012,7 @@ def test_custom_bond_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_ANGLE_TORSION_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_angle_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x948d89a476f8cb96, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x948d89a476f8cb96, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1052,7 +1049,7 @@ def test_custom_angle_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_ANGLE_TORSION_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_torsion_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0xcf7c2ae1674b5e5a, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0xcf7c2ae1674b5e5a, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1089,7 +1086,7 @@ def test_custom_torsion_force(template_data, class_data_list, class_subset):
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_COMPOUND_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_compound_bond_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x55c72cb9cee9051b, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x55c72cb9cee9051b, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1128,7 +1125,7 @@ def test_custom_compound_bond_force(template_data, class_data_list, class_subset
 @pytest.mark.parametrize("class_data_list", HELP_CUSTOM_COMPOUND_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_custom_centroid_bond_force(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0x602824bce1cdf3bf, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0x602824bce1cdf3bf, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1178,7 +1175,7 @@ def test_custom_centroid_bond_force(template_data, class_data_list, class_subset
 @pytest.mark.parametrize("class_subset", (False, True))
 @pytest.mark.parametrize("with_groups", (False, True))
 def test_custom_nonbonded_force(template_data, class_data_list, class_subset, with_groups):
-    rng = numpy.random.default_rng((0x2d9631bbf3c06006, help_deterministic_hash((template_data, class_data_list, class_subset, with_groups))))
+    rng = numpy.random.default_rng((0x2d9631bbf3c06006, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset, with_groups))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1238,7 +1235,7 @@ def test_custom_nonbonded_force(template_data, class_data_list, class_subset, wi
 @pytest.mark.parametrize("class_data_list", HELP_FORCE_GROUP_CLASS_DATA_LIST)
 @pytest.mark.parametrize("class_subset", (False, True))
 def test_force_groups(template_data, class_data_list, class_subset):
-    rng = numpy.random.default_rng((0xeb51a94a1d59c3d4, help_deterministic_hash((template_data, class_data_list, class_subset))))
+    rng = numpy.random.default_rng((0xeb51a94a1d59c3d4, helpers_test.help_deterministic_hash((template_data, class_data_list, class_subset))))
 
     template_sizes, template_indices = template_data
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
@@ -1358,7 +1355,7 @@ def test_continuous_3d_function():
 
 @pytest.mark.parametrize("template_indices", HELP_TEMPLATE_INDICES_SAMPLE)
 def test_stack_forces(template_indices):
-    rng = numpy.random.default_rng((0xf06bb5a84b266ced, help_deterministic_hash((template_indices,))))
+    rng = numpy.random.default_rng((0xf06bb5a84b266ced, helpers_test.help_deterministic_hash((template_indices,))))
 
     temperature_scales = numpy.exp(rng.uniform(-2, 2, len(template_indices)))
     combined_system, particle_offsets = multiopenmm.stacking.stack(HELP_SAMPLE_SYSTEMS, template_indices, temperature_scales)

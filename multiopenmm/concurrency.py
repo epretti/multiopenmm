@@ -49,10 +49,8 @@ class Manager(abc.ABC):
         multiopenmm.PlatformData: Custom platform information to be used at
         context creation.
 
-        If None, OpenMM will be permitted to choose a default platform and
-        platform parameters when creating contexts.  If this value is changed,
-        it will affect new contexts, while existing contexts will remain
-        unaffected.
+        If `None`, OpenMM will be permitted to choose a default platform and
+        platform parameters when creating contexts.
         """
 
         return self.__platform_data
@@ -112,8 +110,8 @@ class SynchronousManager(Manager):
 
     __slots__ = ("__client", "__results")
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         self.__client = simulation.Client()
         self.__results = {}

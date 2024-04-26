@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 from .support import MultiOpenMMError, MultiOpenMMWarning, get_scratch_directory, set_scratch_directory
-from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble, IntegrationResult
+from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble, IntegrationResult, RandomAdjacentExchangePairGenerator, MetropolisAcceptanceCriterion
 from .concurrency import Manager, SynchronousManager
 from .simulation import PlatformData
 from .export import DCDExporter, TextEnergyExporter

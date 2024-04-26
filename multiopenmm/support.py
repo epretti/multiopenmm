@@ -108,7 +108,7 @@ def set_scratch_directory(path=None):
         if not isinstance(path, str):
             raise TypeError("path must be a str")
 
-        __scratch_directory = path
+        __scratch_directory = str(path)
 
 # Initialize __scratch_directory.
 set_scratch_directory()

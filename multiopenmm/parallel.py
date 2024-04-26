@@ -1154,6 +1154,10 @@ class Simulation:
             return integration_result, numpy.array([potential_energies[index] for index in indices])
         else:
             return integration_result
+    
+    def replica_exchange(self, pair_generator, acceptance_criterion, step_count, result_path, write_start=None, write_stop=None, write_step=None, exchange_start=None, exchange_stop=None, exchange_step=None):
+
+        raise NotImplementedError
 
     def __update_instance_data(self):
         # Updates tables used to slice arrays containing per-particle
@@ -1636,6 +1640,11 @@ class IntegrationResult:
     def __init__(self, *data):
         self._set_data(*data)
 
+    def __eq__(self, other):
+        if type(self) is not type(other):
+            return NotImplemented
+        return self._get_data() == other._get_data()
+
     def __getstate__(self):
         return self._get_data()
 
@@ -1663,3 +1672,167 @@ class IntegrationResult:
             self.__particle_indices_start,
             self.__particle_indices_end,
         ) = data
+
+class ExchangePairGenerator(abc.ABC):
+    """
+    Defines an algorithm for generating pairs of instance indices for replica
+    exchange swap attempts.
+    """
+
+    __slots__ = ()
+
+    @abc.abstractmethod
+    def generate(self, rng, iteration_index, instance_count):
+        """
+        Generates pairs of indices of instances for which replica exchange swaps
+        should be attempted.
+
+        Parameters
+        ----------
+        rng : numpy.random.Generator
+            A source of randomness that should be used if the implemented
+            algorithm for generating pairs requires randomness.
+        iteration_index : int
+            An index that will be incremented for every new set of swap
+            attempts.
+        instance_count : int
+            The total number of instances undergoing replica exchange.
+
+        Returns
+        -------
+        iterable of (int, int)
+            Indices specifying pairs of instances for which replica exchange
+            swaps should be attempted.
+
+        Notes
+        -----
+        This method must be implemented in derived classes.  It should be
+        assumed that instance indices increase sequentially from `0` to
+        `iteration_index - 1`.
+        """
+
+        raise NotImplementedError
+
+class RandomAdjacentExchangePairGenerator(ExchangePairGenerator):
+    """
+    Randomly generates pairs of adjacent instance indices for replica exchange
+    swap attempts.
+
+    Parameters
+    ----------
+    swap_count : int
+        The number of swaps to attempt (*i.e.*, the number of pairs to generate
+        per call to :py:meth:`generate`).
+    with_replacement : bool, optional
+        Whether or not the same swap should be attempted more than once in a set
+        (`False` by default).  If not, `swap_count` must be less than the number
+        of instances undergoing replica exchange.
+    """
+
+    __slots__ = ("__swap_count", "__with_replacement")
+
+    def __init__(self, swap_count, with_replacement=False):
+        if not isinstance(swap_count, int):
+            raise TypeError("swap_count must be an int")
+        swap_count = int(swap_count)
+        if swap_count < 0:
+            raise ValueError("swap_count must be non-negative")
+
+        if not isinstance(with_replacement, bool):
+            raise TypeError("with_replacement must be a bool")
+        with_replacement = bool(with_replacement)
+
+        self.__swap_count = swap_count
+        self.__with_replacement = with_replacement
+
+    @property
+    def swap_count(self):
+        """
+        int : The number of swaps to attempt.
+        """
+
+        return self.__swap_count
+
+    @property
+    def with_replacement(self):
+        """
+        bool : Whether or not the same swap should be attempted more than once
+        in a set.
+        """
+
+        return self.__with_replacement
+
+    def generate(self, rng, iteration_index, instance_count):
+        """
+        Generates pairs of indices of instances for which replica exchange swaps
+        should be attempted.
+        """
+
+        for instance_index in rng.choice(instance_count - 1, size=self.__swap_count, replace=self.__with_replacement):
+            yield (instance_index, instance_index + 1)
+
+class AcceptanceCriterion(abc.ABC):
+    """
+    Defines an algorithm for deciding whether or not to accept a replica
+    exchange swap.
+    """
+
+    __slots__ = ()
+
+    @abc.abstractmethod
+    def probability(self, npt, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
+        """
+        Calculates the probability that a replica exchange swap between two
+        replicas (:math:`i` and :math:`j`) should occur.
+
+        Parameters
+        ----------
+        npt : bool
+            `True` for simulations in the isothermal-isobaric ensemble, `False`
+            for simulations in the canonical ensemble.
+        beta_i : float
+            :math:`\\beta_i=1/k_BT_i` where :math:`T_i` is the temperature of
+            replica :math:`i`.
+        beta_j : float
+            :math:`\\beta_j=1/k_BT_j` where :math:`T_j` is the temperature of
+            replica :math:`j`.
+        u_i : float
+            :math:`U_i`, the potential energy of replica :math:`i`.
+        u_j : float
+            :math:`U_j`, the potential energy of replica :math:`j`.
+        p_i : float
+            :math:`P_i`, the potential energy of replica :math:`i`.
+        p_j : float
+            :math:`P_j`, the potential energy of replica :math:`j`.
+        v_i : float
+            :math:`V_i`, the potential energy of replica :math:`i`.
+        v_j : float
+            :math:`V_j`, the potential energy of replica :math:`j`.
+        """
+
+        raise NotImplementedError
+
+class MetropolisAcceptanceCriterion(AcceptanceCriterion):
+    """
+    An acceptance criterion that calculates the probability of whether or not a
+    replica exchange swap between two replicas (:math:`i` and :math:`j`) should
+    occur as:
+
+    .. math::
+       \\mathcal{P}_\\mathrm{acc}(ij\\rightarrow ji)=\\exp\\left(\\min\\left[0,(
+       \\beta_2-\\beta_1)(U_2-U_1)+(\\beta_2P_2-\\beta_1P_1)(V_2-V_1)\\right]
+       \\right)
+
+    (for isothermal-isobaric ensemble simulations; for canonical ensemble
+    simulations, the second term including the pressures will be absent).
+    """
+
+    __slots__ = ()
+
+    def probability(self, npt, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
+        """
+        Calculates the probability that a replica exchange swap between two
+        replicas (:math:`i` and :math:`j`) should occur.
+        """
+
+        return numpy.exp(min(0, (beta_j - beta_i) * (u_j - u_i) + ((beta_j * p_j - beta_i * p_i) * (v_j - v_i) if npt else 0)))

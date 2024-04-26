@@ -180,6 +180,8 @@ class Exporter(abc.ABC):
         This method must be implemented in derived classes.
         """
 
+        raise NotImplementedError
+
 class DCDExporter(Exporter):
     """
     An exporter that writes frame vectors and positions to a DCD trajectory file
