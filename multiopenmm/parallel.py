@@ -1119,7 +1119,7 @@ class Simulation:
                 for instance_index, broadcast_energy in zip(system_data["indices"], *broadcast_out, strict=True):
                     potential_energies[instance_index] = broadcast_energy * broadcast_energy_scale
 
-        expected_frame_count = len(range(step_count)[write_start:write_stop:write_step])
+        expected_frame_count = len(range(step_count + 1)[write_start:write_stop:write_step])
         path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integration_results)))}
 
         path_indices = {}

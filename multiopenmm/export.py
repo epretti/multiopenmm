@@ -28,7 +28,7 @@ import warnings
 from . import parallel
 from . import support
 
-def export(integration_results, exporters):
+def export_results(integration_results, exporters):
     """
     Exports trajectory frames written during calls to
     :py:meth:`multiopenmm.Simulation.integrate`.
@@ -62,7 +62,7 @@ def export(integration_results, exporters):
 
         # Open all files not yet seen, checking that they are valid.
         for path in path_table:
-            if path not in open_files:
+            if path is not None and path not in open_files:
                 file = open(path, "rb")
                 support.RawFileIO.read_header(file)
                 open_files[path] = file
@@ -94,9 +94,18 @@ def export(integration_results, exporters):
             # offset, read and save the frames that were read.
             key = (path_index, byte_offset)
             if key not in read_data:
-                file = open_files[path_table[path_index]]
-                file.seek(byte_offset)
-                read_data[key] = [support.RawFileIO.read_frame(file) for frame_index in range(frame_count)]
+                path = path_table[path_index]
+                if path is None:
+                    # No frames were written and none should be indicated to be
+                    # read in the integration result.
+                    if frame_count:
+                        raise RuntimeError
+                    read_data[key] = []
+                else:
+                    # Frames were written and can be read from the file.
+                    file = open_files[path]
+                    file.seek(byte_offset)
+                    read_data[key] = [support.RawFileIO.read_frame(file) for frame_index in range(frame_count)]
 
             # Apply the slice for the instance and return.
             for vectors, positions, energy in read_data[key]:
@@ -145,10 +154,11 @@ def delete_results(integration_results):
         paths.update(path_table)
 
     for path in sorted(paths):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
+        if path is not None:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
 class Exporter(abc.ABC):
     """

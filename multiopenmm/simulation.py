@@ -414,10 +414,10 @@ class Client:
         integrator = self.__context.getIntegrator()
 
         step_index = 0
-        write_pointer = None
+        write_pointer = 0
         write_count = 0
 
-        for write_index in range(step_count)[write_start:write_stop:write_step]:
+        for write_index in range(step_count + 1)[write_start:write_stop:write_step]:
             # See what step we are at, what step we need to get to to make the
             # next write, and how many steps we need to simulate to get there.
             integrate_count = write_index - step_index
@@ -455,4 +455,4 @@ class Client:
         if integrate_count:
             integrator.step(integrate_count)
 
-        return self.__traj_file.name, write_pointer, write_count, self.__particle_offsets
+        return None if self.__traj_file is None else self.__traj_file.name, write_pointer, write_count, self.__particle_offsets
