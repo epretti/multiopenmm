@@ -59,7 +59,7 @@ class Arguments:
 
     @property
     def kwargs(self):
-        return self.__kwargs
+        return dict(self.__kwargs)
 
     def apply_to(self, function):
         # Calls a given function with the stored arguments.
@@ -81,7 +81,7 @@ def get_scratch_directory():
         The absolute path to the current scratch directory.
     """
 
-    return os.path.realpath(__scratch_directory)
+    return os.path.realpath(_scratch_directory)
 
 def set_scratch_directory(path=None):
     """
@@ -99,18 +99,18 @@ def set_scratch_directory(path=None):
         restored.
     """
 
-    global __scratch_directory
+    global _scratch_directory
     
     if path is None:
-        __scratch_directory = os.getenv("MULTIOPENMMSCRATCH", ".")
+        _scratch_directory = os.getenv("MULTIOPENMMSCRATCH", ".")
 
     else:
         if not isinstance(path, str):
             raise TypeError("path must be a str")
 
-        __scratch_directory = str(path)
+        _scratch_directory = str(path)
 
-# Initialize __scratch_directory.
+# Initialize _scratch_directory.
 set_scratch_directory()
 
 def get_seed(rng):

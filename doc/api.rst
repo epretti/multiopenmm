@@ -52,9 +52,9 @@ Manual trajectory exporting
 .. autoclass:: multiopenmm.IntegrationResult
    :members:
 
-.. autofunction:: multiopenmm.export.export
+.. autofunction:: multiopenmm.export_results
 
-.. autofunction:: multiopenmm.export.delete_results
+.. autofunction:: multiopenmm.delete_results
 
 .. autoclass:: multiopenmm.export.Exporter
    :members:
@@ -123,11 +123,11 @@ Force handling
 .. autoclass:: multiopenmm.stacking.ForceProcessor
    :members:
 
-.. autoclass:: multiopenmm.stacking.ForceHandler
-   :members:
-
 .. autodata:: multiopenmm.stacking.DefaultForceProcessor
    :annotation:
+
+.. autoclass:: multiopenmm.stacking.ForceHandler
+   :members:
 
 Tabulated function handling
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -135,11 +135,11 @@ Tabulated function handling
 .. autoclass:: multiopenmm.stacking.TabulatedFunctionProcessor
    :members:
 
-.. autoclass:: multiopenmm.stacking.TabulatedFunctionHandler
-   :members:
-
 .. autodata:: multiopenmm.stacking.DefaultTabulatedFunctionProcessor
    :annotation:
+
+.. autoclass:: multiopenmm.stacking.TabulatedFunctionHandler
+   :members:
 
 Miscellaneous
 -------------

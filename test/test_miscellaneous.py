@@ -83,6 +83,35 @@ def test_manager_set_platform_data(manager_type, manager_test_data):
     manager.platform_data = platform_data_2
     assert manager.platform_data == platform_data_2
 
+@pytest.mark.parametrize("args", ((), (1,), (1, 2, 3)))
+@pytest.mark.parametrize("kwargs", (dict(), dict(a=1), dict(a=2), dict(b=1), dict(a=1, b=2)))
+def test_arguments(args, kwargs):
+    arguments = multiopenmm.support.Arguments(*args, **kwargs)
+    assert arguments.args == args
+    assert arguments.kwargs == kwargs
+    def check_apply(*check_args, **check_kwargs):
+        assert check_args == args
+        assert check_kwargs == check_kwargs
+    arguments.apply_to(check_apply)
+
+@pytest.mark.parametrize("test_data", (
+    (multiopenmm.support.Arguments(1), 1, False),
+    (multiopenmm.support.Arguments(1), multiopenmm.support.Arguments(2), False),
+    (multiopenmm.support.Arguments(1), multiopenmm.support.Arguments(1, 2), False),
+    (multiopenmm.support.Arguments(1), multiopenmm.support.Arguments(1, a=1), False),
+    (multiopenmm.support.Arguments(1, a=1), multiopenmm.support.Arguments(1, a=2), False),
+    (multiopenmm.support.Arguments(1, a=1), multiopenmm.support.Arguments(1, b=1), False),
+    (multiopenmm.support.Arguments(1, a=1), multiopenmm.support.Arguments(1, a=1, b=2), False),
+    (multiopenmm.support.Arguments(1, a=1, b=2), multiopenmm.support.Arguments(1, 2, a=1, b=2), False),
+    (multiopenmm.support.Arguments(), multiopenmm.support.Arguments(), True),
+    (multiopenmm.support.Arguments(1, 2), multiopenmm.support.Arguments(1, 2), True),
+    (multiopenmm.support.Arguments(a=1, b=2), multiopenmm.support.Arguments(a=1, b=2), True),
+    (multiopenmm.support.Arguments(1, 2, a=1, b=2), multiopenmm.support.Arguments(1, 2, a=1, b=2), True),
+))
+def test_arguments_equal(test_data):
+    arguments_1, arguments_2, should_be_equal = test_data
+    assert (arguments_1 == arguments_2) == should_be_equal
+
 def test_scratch_directory_exists():
     assert os.path.isdir(multiopenmm.get_scratch_directory())
 

@@ -208,7 +208,7 @@ class Processor(abc.ABC):
         # This method can be overridden in subclasses to perform, e.g., type
         # validation, or other checks, on handlers that are being registered.
 
-        pass
+        raise NotImplementedError
 
     @abc.abstractmethod
     def _process(self, *args, **kwargs):
@@ -229,7 +229,7 @@ class VirtualSiteProcessor(Processor):
         the mappings of any previously registered handlers also reporting one or
         more of the same virtual site types.
 
-        :type handler: multiopenmm.stack.VirtualSiteHandler
+        :type handler: multiopenmm.stacking.VirtualSiteHandler
         :param handler: The handler to register.
     """
 
@@ -262,7 +262,7 @@ class VirtualSiteHandler(abc.ABC):
 
     .. code-block::
 
-        class MyCustomVirtualSiteHandler(multiopenmm.stack.VirtualSiteHandler):
+        class MyCustomVirtualSiteHandler(multiopenmm.stacking.VirtualSiteHandler):
             @property
             def handled_types(self):
                 return (MyCustomOpenMMVirtualSite,)
@@ -271,7 +271,7 @@ class VirtualSiteHandler(abc.ABC):
                 ...
                 return MyCustomOpenMMVirtualSite(...)
 
-        multiopenmm.stack.DefaultVirtualSiteProcessor.register_handler(MyCustomVirtualSiteHandler())
+        multiopenmm.stacking.DefaultVirtualSiteProcessor.register_handler(MyCustomVirtualSiteHandler())
     """
 
     __slots__ = ()
@@ -401,7 +401,7 @@ class ForceProcessor(Processor):
         previously registered handlers also reporting one or more of the same
         force types.
 
-        :type handler: multiopenmm.stack.ForceHandler
+        :type handler: multiopenmm.stacking.ForceHandler
         :param handler: The handler to register.
     """
 
@@ -462,7 +462,7 @@ class ForceHandler(abc.ABC):
 
     .. code-block::
 
-        class MyCustomForceHandler(multiopenmm.stack.ForceHandler):
+        class MyCustomForceHandler(multiopenmm.stacking.ForceHandler):
             @property
             def handled_types(self):
                 return (MyCustomOpenMMForce,)
@@ -471,7 +471,7 @@ class ForceHandler(abc.ABC):
                 ...
                 yield MyCustomOpenMMForce(...)
 
-        multiopenmm.stack.DefaultForceProcessor.register_handler(MyCustomForceHandler())
+        multiopenmm.stacking.DefaultForceProcessor.register_handler(MyCustomForceHandler())
     """
 
     __slots__ = ()
@@ -1755,7 +1755,7 @@ class TabulatedFunctionProcessor(Processor):
         overriding the mappings of any previously registered handlers also
         reporting one or more of the same tabulated function types.
 
-        :type handler: multiopenmm.stack.TabulatedFunctionHandler
+        :type handler: multiopenmm.stacking.TabulatedFunctionHandler
         :param handler: The handler to register.
     """
 
@@ -1802,7 +1802,7 @@ class TabulatedFunctionHandler(abc.ABC):
 
     .. code-block::
 
-        class MyCustomTabulatedFunctionHandler(multiopenmm.stack.TabulatedFunctionHandler):
+        class MyCustomTabulatedFunctionHandler(multiopenmm.stacking.TabulatedFunctionHandler):
             @property
             def handled_types(self):
                 return (MyCustomOpenMMTabulatedFunction,)
@@ -1815,7 +1815,7 @@ class TabulatedFunctionHandler(abc.ABC):
                 ...
                 return MyCustomOpenMMTabulatedFunction(...)
 
-        multiopenmm.stack.DefaultTabulatedFunctionProcessor.register_handler(MyCustomTabulatedFunctionHandler())
+        multiopenmm.stacking.DefaultTabulatedFunctionProcessor.register_handler(MyCustomTabulatedFunctionHandler())
 
     Notes
     -----
@@ -1968,8 +1968,8 @@ def _scale_function(function, scale_name):
     expression, *definitions = function.split(";")
     return ";".join([f"{scale_name}*({expression})", *definitions])
 
-#: multiopenmm.stack.VirtualSiteProcessor: The virtual site processor used by
-#: :py:func:`multiopenmm.stack.stack` to process all virtual sites in OpenMM
+#: multiopenmm.stacking.VirtualSiteProcessor: The virtual site processor used by
+#: :py:func:`multiopenmm.stacking.stack` to process all virtual sites in OpenMM
 #: systems.
 DefaultVirtualSiteProcessor = VirtualSiteProcessor()
 
@@ -1978,8 +1978,9 @@ DefaultVirtualSiteProcessor.register_handler(ThreeParticleAverageSiteHandler())
 DefaultVirtualSiteProcessor.register_handler(OutOfPlaneSiteHandler())
 DefaultVirtualSiteProcessor.register_handler(LocalCoordinatesSiteHandler())
 
-#: multiopenmm.stack.ForceProcessor: The force processor used by
-#: :py:func:`multiopenmm.stack.stack` to process all forces in OpenMM systems.
+#: multiopenmm.stacking.ForceProcessor: The force processor used by
+#: :py:func:`multiopenmm.stacking.stack` to process all forces in OpenMM
+#: systems.
 DefaultForceProcessor = ForceProcessor()
 
 DefaultForceProcessor.register_handler(HarmonicBondForceHandler())
@@ -1995,9 +1996,9 @@ DefaultForceProcessor.register_handler(CustomCompoundBondForceHandler())
 DefaultForceProcessor.register_handler(CustomCentroidBondForceHandler())
 DefaultForceProcessor.register_handler(CustomNonbondedForceHandler())
 
-#: multiopenmm.stack.TabulatedFunctionProcessor: The tabulated function
-# processor used by :py:func:`multiopenmm.stack.stack` to process all tabulated
-# functions in forces in OpenMM systems.
+#: multiopenmm.stacking.TabulatedFunctionProcessor: The tabulated function
+#: processor used by :py:func:`multiopenmm.stacking.stack` to process all
+#: tabulated functions in forces in OpenMM systems.
 DefaultTabulatedFunctionProcessor = TabulatedFunctionProcessor()
 
 DefaultTabulatedFunctionProcessor.register_handler(FallbackTabulatedFunctionHandler())
