@@ -9,3 +9,14 @@ systems, within a single OpenMM context.
 
 🚧 **This library is a work in progress; many features may be incomplete,
 incompletely documented, or incompletely tested.** 🚧
+
+Development and license information
+-----------------------------------
+
+This software is developed by Evan Pretti in the [Shell research
+group](https://theshelllab.org/) in the [Department of Chemical
+Engineering](https://www.chemengr.ucsb.edu/) at the [University of California,
+Santa Barbara](https://www.ucsb.edu/).
+
+This software is ©2024 The Regents of the University of California.  All rights
+reserved.  For license information, see the [license file](LICENSE.md).
