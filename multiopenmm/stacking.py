@@ -793,7 +793,7 @@ class CMAPTorsionForceHandler(ForceHandler):
                 # scale, but an index may exist in the table by parameters.
 
                 size, energy = map_parameters[template_index][force_index][map_index]
-                map_parameters_key = (size, tuple(energy_scale * energy_ij for energy_ij in energy.value_in_unit_system(openmm.unit.md_unit_system)))
+                map_parameters_key = (size, tuple(energy_scale * energy_ij for energy_ij in support.strip_units(energy)))
                 map_parameters_value = map_parameters_table.get(map_parameters_key, None)
 
                 if map_parameters_value is None:
@@ -1650,8 +1650,8 @@ class CustomNonbondedForceHandler(ForceHandler):
                     force.getNonbondedMethod(),
                     force.getUseSwitchingFunction(),
                     force.getUseLongRangeCorrection(),
-                    force.getCutoffDistance().value_in_unit_system(openmm.unit.md_unit_system),
-                    force.getSwitchingDistance().value_in_unit_system(openmm.unit.md_unit_system),
+                    support.strip_units(force.getCutoffDistance()),
+                    support.strip_units(force.getSwitchingDistance()),
                     tuple(compute_parameters[template_index][force_index]),
                     tuple(global_parameter_names[template_index][force_index]),
                     tuple(global_parameter_values[template_index][force_index]),

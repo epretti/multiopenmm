@@ -170,25 +170,31 @@ def test_raw_io_none():
 @pytest.mark.parametrize("particle_count", (0, 1, 2, 100))
 @pytest.mark.parametrize("write_vectors", (0, 1))
 @pytest.mark.parametrize("write_positions", (0, 1))
-@pytest.mark.parametrize("write_energy", (0, 1))
-def test_raw_io_single(particle_count, write_vectors, write_positions, write_energy):
-    rng = numpy.random.default_rng((0xd44b0a917e3d356e, helpers_test.help_deterministic_hash((particle_count, write_vectors, write_positions, write_energy))))
+@pytest.mark.parametrize("write_velocities", (0, 1))
+@pytest.mark.parametrize("write_potential_energy", (0, 1))
+@pytest.mark.parametrize("write_kinetic_energy", (0, 1))
+def test_raw_io_single(particle_count, write_vectors, write_positions, write_velocities, write_potential_energy, write_kinetic_energy):
+    rng = numpy.random.default_rng((0xd44b0a917e3d356e, helpers_test.help_deterministic_hash((particle_count, write_vectors, write_positions, write_velocities, write_potential_energy, write_kinetic_energy))))
 
     vectors = rng.normal(size=(3, 3)) if write_vectors else None
     positions = rng.normal(size=(particle_count, 3)) if write_positions else None
-    energy = rng.normal() if write_energy else None
+    velocities = rng.normal(size=(particle_count, 3)) if write_velocities else None
+    potential_energy = rng.normal() if write_potential_energy else None
+    kinetic_energy = rng.normal() if write_kinetic_energy else None
 
     file = io.BytesIO()
     multiopenmm.support.RawFileIO.write_header(file)
-    multiopenmm.support.RawFileIO.write_frame(file, vectors, positions, energy)
+    multiopenmm.support.RawFileIO.write_frame(file, vectors, positions, velocities, potential_energy, kinetic_energy)
 
     file.seek(0)
 
     multiopenmm.support.RawFileIO.read_header(file)
-    read_vectors, read_positions, read_energy = multiopenmm.support.RawFileIO.read_frame(file)
-    helpers_test.help_check_equal_none(vectors, read_vectors)
-    helpers_test.help_check_equal_none(positions, read_positions)
-    assert energy == read_energy
+    frame = multiopenmm.support.RawFileIO.read_frame(file)
+    helpers_test.help_check_equal_none(vectors, frame.get("vectors"))
+    helpers_test.help_check_equal_none(positions, frame.get("positions"))
+    helpers_test.help_check_equal_none(velocities, frame.get("velocities"))
+    assert potential_energy == frame.get("potential_energy")
+    assert kinetic_energy == frame.get("kinetic_energy")
     with pytest.raises(multiopenmm.MultiOpenMMError):
         multiopenmm.support.RawFileIO.read_frame(file)
 
@@ -196,13 +202,17 @@ def test_raw_io_single(particle_count, write_vectors, write_positions, write_ene
 @pytest.mark.parametrize("particle_count_kind", (0, 1, 2, 100, None))
 @pytest.mark.parametrize("write_vectors", (0, 1, 2))
 @pytest.mark.parametrize("write_positions", (0, 1, 2))
-@pytest.mark.parametrize("write_energy", (0, 1, 2))
-def test_raw_io_multiple(frame_count, particle_count_kind, write_vectors, write_positions, write_energy):
-    rng = numpy.random.default_rng((0x1b44f9b2f2f66147, helpers_test.help_deterministic_hash((frame_count, particle_count_kind, write_vectors, write_positions, write_energy))))
+@pytest.mark.parametrize("write_velocities", (0, 1, 2))
+@pytest.mark.parametrize("write_potential_energy", (0, 1, 2))
+@pytest.mark.parametrize("write_kinetic_energy", (0, 1, 2))
+def test_raw_io_multiple(frame_count, particle_count_kind, write_vectors, write_positions, write_velocities, write_potential_energy, write_kinetic_energy):
+    rng = numpy.random.default_rng((0x1b44f9b2f2f66147, helpers_test.help_deterministic_hash((frame_count, particle_count_kind, write_vectors, write_positions, write_velocities, write_potential_energy, write_kinetic_energy))))
 
     written_vectors = []
     written_positions = []
-    written_energy = []
+    written_velocities = []
+    written_potential_energy = []
+    written_kinetic_energy = []
     
     file = io.BytesIO()
     multiopenmm.support.RawFileIO.write_header(file)
@@ -210,20 +220,26 @@ def test_raw_io_multiple(frame_count, particle_count_kind, write_vectors, write_
         particle_count = (rng.integers(2) if rng.integers(2) else rng.integers(2, 101)) if particle_count_kind is None else particle_count_kind
         vectors = rng.normal(size=(3, 3)) if write_vectors == 2 or (write_vectors == 1 and rng.integers(2)) else None
         positions = rng.normal(size=(particle_count, 3)) if write_positions == 2 or (write_positions == 1 and rng.integers(2)) else None
-        energy = rng.normal() if write_energy == 2 or (write_energy == 1 and rng.integers(2)) else None
+        velocities = rng.normal(size=(particle_count, 3)) if write_velocities == 2 or (write_velocities == 1 and rng.integers(2)) else None
+        potential_energy = rng.normal() if write_potential_energy == 2 or (write_potential_energy == 1 and rng.integers(2)) else None
+        kinetic_energy = rng.normal() if write_kinetic_energy == 2 or (write_kinetic_energy == 1 and rng.integers(2)) else None
 
-        multiopenmm.support.RawFileIO.write_frame(file, vectors, positions, energy)
+        multiopenmm.support.RawFileIO.write_frame(file, vectors, positions, velocities, potential_energy, kinetic_energy)
         written_vectors.append(vectors)
         written_positions.append(positions)
-        written_energy.append(energy)
+        written_velocities.append(velocities)
+        written_potential_energy.append(potential_energy)
+        written_kinetic_energy.append(kinetic_energy)
     
     file.seek(0)
     multiopenmm.support.RawFileIO.read_header(file)
     for frame_index in range(frame_count):
-        read_vectors, read_positions, read_energy = multiopenmm.support.RawFileIO.read_frame(file)
-        helpers_test.help_check_equal_none(written_vectors[frame_index], read_vectors)
-        helpers_test.help_check_equal_none(written_positions[frame_index], read_positions)
-        assert written_energy[frame_index] == read_energy
+        frame = multiopenmm.support.RawFileIO.read_frame(file)
+        helpers_test.help_check_equal_none(written_vectors[frame_index], frame.get("vectors"))
+        helpers_test.help_check_equal_none(written_positions[frame_index], frame.get("positions"))
+        helpers_test.help_check_equal_none(written_velocities[frame_index], frame.get("velocities"))
+        assert written_potential_energy[frame_index] == frame.get("potential_energy")
+        assert written_kinetic_energy[frame_index] == frame.get("kinetic_energy")
     with pytest.raises(multiopenmm.MultiOpenMMError):
         multiopenmm.support.RawFileIO.read_frame(file)
 

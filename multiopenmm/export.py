@@ -92,26 +92,27 @@ def export_results(integration_results, exporters):
 
             # If we have yet to read from the indicated path at the indicated
             # offset, read and save the frames that were read.
-            key = (path_index, byte_offset)
-            if key not in read_data:
+            data_key = (path_index, byte_offset)
+            if data_key not in read_data:
                 path = path_table[path_index]
                 if path is None:
                     # No frames were written and none should be indicated to be
                     # read in the integration result.
                     if frame_count:
                         raise RuntimeError
-                    read_data[key] = []
+                    read_data[data_key] = []
                 else:
                     # Frames were written and can be read from the file.
                     file = open_files[path]
                     file.seek(byte_offset)
-                    read_data[key] = [support.RawFileIO.read_frame(file) for frame_index in range(frame_count)]
+                    read_data[data_key] = [support.RawFileIO.read_frame(file) for frame_index in range(frame_count)]
 
             # Apply the slice for the instance and return.
-            for vectors, positions, energy in read_data[key]:
-                if positions is not None:
-                    positions = positions[particle_index_start:particle_index_end]
-                yield vectors, positions, energy
+            for frame in map(dict, read_data[data_key]):
+                for frame_key in ("positions", "velocities"):
+                    if frame_key in frame:
+                        frame[frame_key] = frame[frame_key][particle_index_start:particle_index_end]
+                yield frame
 
         # Invoke each exporter.
         for exporter in exporters:
@@ -136,11 +137,14 @@ def delete_results(integration_results):
 
     Notes
     -----
-    This function is intended to be called after :py:func:`export` has been
-    called as many times as desired to extract information from result objects
-    after a run.  This function will permanently delete all of the raw
+    This function is intended to be called after :py:func:`export_results` has
+    been called as many times as desired to extract information from result
+    objects after a run.  This function will permanently delete all of the raw
     trajectory files referenced by the result objects, even if they contain
     other trajectory frames not referenced by any of the given result objects.
+    This function should not be called without first exporting all of the
+    information from the referenced raw trajectory files unless it is desired to
+    permanently discard the simulation results within.
     """
 
     integration_results = tuple(integration_results)
@@ -177,13 +181,16 @@ class Exporter(abc.ABC):
         get_frames : callable
             A function that accepts an integer indicating the index of the
             instance for which trajectory frames are to be retrieved, and
-            returns an iterable object yielding three-element tuples.  A `None`
-            entry in a tuple indicates no data of this kind for a frame.  The
-            first element of each tuple, if not `None`, will be a `(3, 3)`
-            matrix of periodic box vector components, in row vector form.  The
-            second element, if not `None`, will be a `(particle_count, 3)`
-            matrix of position coordinates, and the third element, a scalar
-            potential energy value.
+            returns an iterable object yielding dictionaries.  Each dictionary
+            may have zero or more of the following keys: ``"vectors"``, whose
+            associated values will be ``(3, 3)`` matrices of periodic box vector
+            components, in row vector form; ``"positions"``, whose associated
+            values will be ``(particle_count, 3)`` matrices of position
+            coordinates; ``"velocities"``, whose associated values will be
+            ``(particle_count, 3)`` matrices of velocity components;
+            ``"potential_energy"``, whose associated values will be scalar
+            potential energy values; ``"kinetic_energy"``, whose associated
+            values will be scalar kinetic energy values.
 
         Notes
         -----
@@ -209,7 +216,7 @@ class DCDExporter(Exporter):
 
     Notes
     -----
-    `mdtraj` must be installed to create an instance of this exporter.
+    MDTraj must be installed to create an instance of this exporter.
     """
 
     A_PER_NM = 10
@@ -276,11 +283,13 @@ class DCDExporter(Exporter):
         Exports information from trajectory frames.
         """
 
-        for vectors, positions, _ in get_frames(self.__index):
+        for frame in get_frames(self.__index):
+            vectors = frame.get("vectors")
+            positions = frame.get("positions")
+
             if positions is None:
                 raise ValueError("missing positions")
-            else:
-                positions = positions * self.A_PER_NM
+            positions = positions * self.A_PER_NM
 
             if vectors is not None and self.__write_vectors:
                 if numpy.any(numpy.triu(vectors, 1)):
@@ -293,10 +302,11 @@ class DCDExporter(Exporter):
 
             self.__file.write(positions, lengths, angles)
 
-class TextEnergyExporter(Exporter):
+class TextVelocityExporter(Exporter):
     """
-    An exporter that writes frame energies to a text file with the specified
-    path, one energy per line.
+    An exporter that writes frame velocities to a text file with the specified
+    path, one set of velocities as an N-by-3 matrix flattened into a vector, per
+    line.
 
     Parameters
     ----------
@@ -347,14 +357,117 @@ class TextEnergyExporter(Exporter):
         """
 
         return self.__index
+    
+    def export(self, get_frames):
+        """
+        Exports information from trajectory frames.
+        """
+
+        for frame in get_frames(self.__index):
+            velocities = frame.get("velocities")
+
+            if velocities is None:
+                raise ValueError("missing velocities")
+
+            print(" ".join(f"{velocity:24.16e}" for velocity in velocities.flatten()), file=self.__file)
+
+class TextEnergyExporter(Exporter):
+    """
+    An exporter that writes frame energies to a text file with the specified
+    path, one potential energy followed by one kinetic energy, as desired, per
+    line.
+
+    Parameters
+    ----------
+    path : str
+        The path to which to write.
+    index : int
+        The index of the instance for which to export information.
+    write_potential : bool, optional
+        Whether or not to write potential energy values.
+    write_kinetic : bool, optional
+        Whether or not to write kinetic energy values.
+    """
+
+    __slots__ = ("__path", "__index", "__write_potential", "__write_kinetic",
+        "__file")
+
+    def __init__(self, path, index, write_potential=True, write_kinetic=True):
+        if not isinstance(path, str):
+            raise TypeError("path must be a str")
+        if not isinstance(index, int):
+            raise TypeError("index must be an int")
+        if not isinstance(write_potential, bool):
+            raise TypeError("write_potential must be a bool")
+        if not isinstance(write_kinetic, bool):
+            raise TypeError("write_kinetic must be a bool")
+
+        self.__path = str(path)
+        self.__index = int(index)
+        self.__write_potential = bool(write_potential)
+        self.__write_kinetic = bool(write_kinetic)
+
+        self.__file = open(self.__path, "w")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
+        """
+        Closes the file to which the exporter exports.
+        """
+
+        self.__file.close()
+
+    @property
+    def path(self):
+        """
+        str: The path to which to write.
+        """
+
+        return self.__path
+
+    @property
+    def index(self):
+        """
+        int : The index of the instance for which to export information.
+        """
+
+        return self.__index
+    
+    @property
+    def write_potential(self):
+        """
+        bool : Whether or not to write potential energy values.
+        """
+
+        return self.__write_potential
+
+    @property
+    def write_kinetic(self):
+        """
+        bool : Whether or not to write kinetic energy values.
+        """
+
+        return self.__write_kinetic
 
     def export(self, get_frames):
         """
         Exports information from trajectory frames.
         """
 
-        for _, _, energy in get_frames(self.__index):
-            if energy is None:
-                raise ValueError("missing energy")
+        for frame in get_frames(self.__index):
+            potential_energy = frame.get("potential_energy")
+            kinetic_energy = frame.get("kinetic_energy")
 
-            print(f"{energy:24.16e}", file=self.__file)
+            if potential_energy is None and self.__write_potential:
+                raise ValueError("missing potential energy")
+            if kinetic_energy is None and self.__write_kinetic:
+                raise ValueError("missing kinetic energy")
+
+            energies = ((potential_energy,) if self.__write_potential else ()) \
+                + ((kinetic_energy,) if self.__write_kinetic else ())
+            print(" ".join(f"{energy:24.16e}" for energy in energies), file=self.__file)

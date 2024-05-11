@@ -24,4 +24,4 @@ from .support import MultiOpenMMError, MultiOpenMMWarning, get_scratch_directory
 from .parallel import Precision, Thermostat, Barostat, Simulation, Ensemble, CanonicalEnsemble, IsothermalIsobaricEnsemble, IntegrationResult, RandomAdjacentExchangePairGenerator, MetropolisAcceptanceCriterion
 from .concurrency import Manager, SynchronousManager
 from .simulation import PlatformData
-from .export import export_results, delete_results, DCDExporter, TextEnergyExporter
+from .export import export_results, delete_results, DCDExporter, TextVelocityExporter, TextEnergyExporter

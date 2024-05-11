@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import numpy
+import openmm
 import os
 import pickle
 import struct
@@ -113,6 +114,12 @@ def set_scratch_directory(path=None):
 # Initialize _scratch_directory.
 set_scratch_directory()
 
+def strip_units(quantity):
+    # Removes units from a quantity returned by the OpenMM Python API and
+    # returns a raw scalar or array.
+
+    return quantity.value_in_unit_system(openmm.unit.md_unit_system)
+
 def get_seed(rng):
     # Returns a positive random seed that will not overflow a 32-bit
     # integer.  This explicitly excludes zero, as this is sometimes interpreted
@@ -168,53 +175,76 @@ class RawFileIO:
             raise MultiOpenMMError("invalid header in raw trajectory file")
 
     @classmethod
-    def write_frame(cls, file, vectors=None, positions=None, energy=None):
+    def write_frame(cls, file, vectors=None, positions=None, velocities=None, potential_energy=None, kinetic_energy=None):
         # Writes a frame of data to a raw trajectory file.  vectors should be
         # None or a 3-by-3 NumPy array.  positions should be None or an N-by-3
-        # NumPy array.  energy should be None or a scalar.
+        # NumPy array.  velocities should be None or an N-by-3 NumPy array.
+        # potential_energy should be None or a scalar.  kinetic_energy should be
+        # None or a scalar.
 
         write_vectors = vectors is not None
         write_positions = positions is not None
-        write_energy = energy is not None
+        write_velocities = velocities is not None
+        write_potential_energy = potential_energy is not None
+        write_kinetic_energy = kinetic_energy is not None
 
-        frame_flags = int(write_vectors) | int(write_positions) << 1 | int(write_energy) << 2
-        file.write(bytes((frame_flags,)))
+        if write_positions and write_velocities and positions.shape[0] != velocities.shape[0]:
+            raise RuntimeError("invalid shapes")
+        
+        output = []
+
+        frame_flags = int(write_vectors) | int(write_positions) << 1 | int(write_velocities) << 2 | int(write_potential_energy) << 3 | int(write_kinetic_energy) << 4
+        output.append(bytes((frame_flags,)))
 
         if write_vectors:
-            file.write(vectors.astype(cls.FLOATING_TYPE).tobytes())
+            output.append(vectors.astype(cls.FLOATING_TYPE).tobytes())
+
+        if write_positions or write_velocities:
+            output.append(struct.pack(cls.INTEGER_FORMAT, positions.shape[0] if write_positions else velocities.shape[0]))
 
         if write_positions:
-            file.write(struct.pack(cls.INTEGER_FORMAT, positions.shape[0]))
-            file.write(positions.astype(cls.FLOATING_TYPE).tobytes())
+            output.append(positions.astype(cls.FLOATING_TYPE).tobytes())
 
-        if write_energy:
-            file.write(numpy.array(energy, dtype=cls.FLOATING_TYPE).tobytes())
+        if write_velocities:
+            output.append(velocities.astype(cls.FLOATING_TYPE).tobytes())
+
+        if write_potential_energy:
+            output.append(numpy.array(potential_energy, dtype=cls.FLOATING_TYPE).tobytes())
+
+        if write_kinetic_energy:
+            output.append(numpy.array(kinetic_energy, dtype=cls.FLOATING_TYPE).tobytes())
+
+        file.write(b"".join(output))
 
     @classmethod
     def read_frame(cls, file):
         # Reads a frame of data from a raw trajectory file.
 
         frame_flags, = read_exactly(file, 1)
-        if frame_flags >> 3:
+        if frame_flags >> 5:
             raise MultiOpenMMError("unknown frame flags in raw trajectory file")
 
+        frame = {}
+
         if frame_flags & 1: # read_vectors
-            vectors = numpy.frombuffer(read_exactly(file, 9 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(3, 3)
-        else:
-            vectors = None
+            frame["vectors"] = numpy.frombuffer(read_exactly(file, 9 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(3, 3)
+
+        if frame_flags >> 1 & 3: # read_positions or read_velocities
+            particle_count, = struct.unpack(cls.INTEGER_FORMAT, read_exactly(file, cls.INTEGER_BYTE_COUNT))
 
         if frame_flags >> 1 & 1: # read_positions
-            particle_count, = struct.unpack(cls.INTEGER_FORMAT, read_exactly(file, cls.INTEGER_BYTE_COUNT))
-            positions = numpy.frombuffer(read_exactly(file, particle_count * 3 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(particle_count, 3)
-        else:
-            positions = None
+            frame["positions"] = numpy.frombuffer(read_exactly(file, particle_count * 3 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(particle_count, 3)
 
-        if frame_flags >> 2 & 1: # read_energy
-            energy, = numpy.frombuffer(read_exactly(file, cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE)
-        else:
-            energy = None
-        
-        return vectors, positions, energy
+        if frame_flags >> 2 & 1: # read_velocities
+            frame["velocities"] = numpy.frombuffer(read_exactly(file, particle_count * 3 * cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE).reshape(particle_count, 3)
+
+        if frame_flags >> 3 & 1: # read_potential_energy
+            frame["potential_energy"], = numpy.frombuffer(read_exactly(file, cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE)
+
+        if frame_flags >> 4 & 1: # read_kinetic_energy
+            frame["kinetic_energy"], = numpy.frombuffer(read_exactly(file, cls.FLOATING_BYTE_COUNT), dtype=cls.FLOATING_TYPE)
+
+        return frame
 
 class ResultFileIO:
     # Handles reading and writing integration result files.  The integration
@@ -259,8 +289,7 @@ class ResultFileIO:
         # Writes an integration result to an integration result file.
 
         data = zlib.compress(pickle.dumps(integration_result), level=cls.ZLIB_LEVEL, wbits=cls.ZLIB_WBITS)
-        file.write(struct.pack(cls.INTEGER_FORMAT, len(data)))
-        file.write(data)
+        file.write(struct.pack(cls.INTEGER_FORMAT, len(data)) + data)
 
     @classmethod
     def read_result(cls, file):

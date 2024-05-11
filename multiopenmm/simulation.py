@@ -125,7 +125,7 @@ class ContextData:
         # Some data that can be squirrelled away in the ContextData object and
         # modified without causing the ContextData object to compare unequal to
         # an otherwise identical ContextData object.  This is useful to be able
-        # to update the simulation temperature and pressure without triggering a
+        # to update the simulation thermodynamic conditions without triggering a
         # reconstruction of an entire context from scratch.
 
         return self.__runtime_data
@@ -160,9 +160,8 @@ class PlatformData:
             raise TypeError("platform_name must be a str")
         platform_name = str(platform_name)
 
-        if platform_properties is None:
-            platform_properties = {}
-        else:
+        platform_properties_items = []
+        if platform_properties is not None:
             if not isinstance(platform_properties, dict):
                 raise TypeError("platform_properties must be a dict")
 
@@ -172,10 +171,10 @@ class PlatformData:
                 if not isinstance(property_value, str):
                     raise TypeError("platform property value must be a str")
 
-            platform_properties = {str(property_name): str(property_value) for property_name, property_value in platform_properties.items()}
+                platform_properties_items.append((str(property_name), str(property_value)))
 
         self.__platform_name = platform_name
-        self.__platform_properties = platform_properties
+        self.__platform_properties = dict(platform_properties_items)
 
     def __repr__(self):
         return f"PlatformData({self.__platform_name!r}, {self.__platform_properties!r})"
@@ -248,7 +247,7 @@ class Client:
             self.__context = context
             self.__particle_offsets = particle_offsets
             self.__particle_masses = numpy.array([
-                system.getParticleMass(particle_index).value_in_unit_system(openmm.unit.md_unit_system)
+                support.strip_units(system.getParticleMass(particle_index))
                 for particle_index in range(system.getNumParticles())
             ])
 
@@ -311,16 +310,21 @@ class Client:
             # unwrapped coordinates for broadcasted potential energy evaluation.
             enforce_periodic_flag = bool(positions_out and not broadcast_out and numpy.all(enforce_periodic))
 
-            state = self.__context.getState(getPositions=positions_out or broadcast_out, getVelocities=velocities_out, getEnergy=energies_out, enforcePeriodicBox=enforce_periodic_flag)
+            state = self.__context.getState(
+                getPositions=positions_out or broadcast_out,
+                getVelocities=velocities_out,
+                getEnergy=energies_out,
+                enforcePeriodicBox=enforce_periodic_flag,
+            )
 
         if vectors_out:
-            state_results.append(state.getPeriodicBoxVectors(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system))
+            state_results.append(support.strip_units(state.getPeriodicBoxVectors(asNumpy=True)))
 
         if positions_out or broadcast_out:
             # The raw_positions array will never be modified and contains
             # unwrapped coordinates unless broadcast_out is False and all
             # instances are requesting wrapped coordinates.
-            raw_positions = state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system)
+            raw_positions = support.strip_units(state.getPositions(asNumpy=True))
 
         if positions_out:
             # The positions array may be modified by replacing the unwrapped
@@ -342,7 +346,7 @@ class Client:
             # coordinates already retrieved.
             if get_wrapped_state_flag:
                 wrapped_state = self.__context.getState(getPositions=True, enforcePeriodicBox=True)
-                wrapped_positions = wrapped_state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system)
+                wrapped_positions = support.strip_units(wrapped_state.getPositions(asNumpy=True))
                 for instance_index, enforce_periodic_instance in enumerate(enforce_periodic):
                     if enforce_periodic_instance:
                         instance_slice = slice(self.__particle_offsets[instance_index], self.__particle_offsets[instance_index + 1])
@@ -361,11 +365,11 @@ class Client:
             state_results.append(positions)
 
         if velocities_out:
-            state_results.append(state.getVelocities(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system))
+            state_results.append(support.strip_units(state.getVelocities(asNumpy=True)))
 
         if energies_out:
-            state_results.append(state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system))
-            state_results.append(state.getKineticEnergy().value_in_unit_system(openmm.unit.md_unit_system))
+            state_results.append(support.strip_units(state.getPotentialEnergy()))
+            state_results.append(support.strip_units(state.getKineticEnergy()))
 
         if broadcast_out:
             broadcast_energies = []
@@ -375,10 +379,11 @@ class Client:
             # this will either select only the first positions from the source
             # instance, or leave extra positions at the destination instance.
             # Normally, this will be done with identical instances, so no such
-            # mismatches will occur; note in this case that if the unscaled
-            # energy of an instance is desired, it is necessary to divide the
-            # returned energies by the sum of the scale factors for the
-            # instances.
+            # mismatches will occur (as the energies returned in the case of
+            # such mismatches will usually correspond to non-physical
+            # configurations); note in this case that if the unscaled energy of
+            # an instance is desired, it is necessary to divide the returned
+            # energies by the sum of the scale factors for the instances.
             for evaluate_instance_index, (evaluate_start_index, evaluate_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
                 evaluate_positions = numpy.array(raw_positions)
                 for source_instance_index, (source_start_index, source_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
@@ -387,7 +392,7 @@ class Client:
                     length = min(evaluate_end_index - evaluate_start_index, source_end_index - source_start_index)
                     evaluate_positions[evaluate_start_index:evaluate_start_index + length] = evaluate_positions[source_start_index:source_start_index + length]
                 self.__context.setPositions(evaluate_positions)
-                broadcast_energies.append(self.__context.getState(getEnergy=True).getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system))
+                broadcast_energies.append(support.strip_units(self.__context.getState(getEnergy=True).getPotentialEnergy()))
 
             # Restore the original positions.
             self.__context.setPositions(raw_positions)
@@ -410,7 +415,7 @@ class Client:
     def maxwell_boltzmann(self, run_temperature):
         self.__context.setVelocitiesToTemperature(run_temperature, support.get_seed(self.__rng))
 
-    def integrate(self, step_count, write_start, write_stop, write_step, write_energy):
+    def integrate(self, step_count, write_start, write_stop, write_step, write_velocities, write_energies):
         integrator = self.__context.getIntegrator()
 
         step_index = 0
@@ -436,11 +441,13 @@ class Client:
                 write_pointer = self.__traj_file.tell()
 
             # Retrieve vectors and positions to write to the trajectory file.
-            state = self.__context.getState(getPositions=True, getEnergy=write_energy)
+            state = self.__context.getState(getPositions=True, getVelocities=write_velocities, getEnergy=write_energies)
             support.RawFileIO.write_frame(self.__traj_file,
-                vectors=state.getPeriodicBoxVectors(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system),
-                positions=state.getPositions(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system),
-                energy=state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system) if write_energy else None,
+                vectors=support.strip_units(state.getPeriodicBoxVectors(asNumpy=True)),
+                positions=support.strip_units(state.getPositions(asNumpy=True)),
+                velocities=support.strip_units(state.getVelocities(asNumpy=True)) if write_velocities else None,
+                potential_energy=support.strip_units(state.getPotentialEnergy()) if write_energies else None,
+                kinetic_energy=support.strip_units(state.getKineticEnergy()) if write_energies else None,
             )
 
             write_count += 1

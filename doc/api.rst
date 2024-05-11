@@ -63,6 +63,10 @@ Manual trajectory exporting
    :members:
    :show-inheritance:
 
+.. autoclass:: multiopenmm.TextVelocityExporter
+   :members:
+   :show-inheritance:
+
 .. autoclass:: multiopenmm.TextEnergyExporter
    :members:
    :show-inheritance:

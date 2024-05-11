@@ -396,8 +396,8 @@ def help_check_combined_context(temperature_scales, templates, template_indices,
                 else:
                     state = context.getState(getForces=True, getEnergy=True, getParameterDerivatives=True, groups=1 << force_group)
 
-                reference_energies[instance_index] = state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system) / temperature_scale
-                reference_forces[particle_index_1:particle_index_2] = state.getForces(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system) / temperature_scale
+                reference_energies[instance_index] = multiopenmm.support.strip_units(state.getPotentialEnergy()) / temperature_scale
+                reference_forces[particle_index_1:particle_index_2] = multiopenmm.support.strip_units(state.getForces(asNumpy=True)) / temperature_scale
 
                 derivatives = {name: value / temperature_scale for name, value in dict(state.getEnergyParameterDerivatives()).items()}
                 reference_derivatives[instance_index] = derivatives
@@ -416,8 +416,8 @@ def help_check_combined_context(temperature_scales, templates, template_indices,
     else:
         state = context.getState(getForces=True, getEnergy=True, getParameterDerivatives=True, groups=1 << force_group)
     
-    assert state.getPotentialEnergy().value_in_unit_system(openmm.unit.md_unit_system) == pytest.approx(numpy.sum(reference_energies))
-    assert state.getForces(asNumpy=True).value_in_unit_system(openmm.unit.md_unit_system) == pytest.approx(reference_forces)
+    assert multiopenmm.support.strip_units(state.getPotentialEnergy()) == pytest.approx(numpy.sum(reference_energies))
+    assert multiopenmm.support.strip_units(state.getForces(asNumpy=True)) == pytest.approx(reference_forces)
 
     derivatives = dict(state.getEnergyParameterDerivatives())
     assert set(derivatives) == derivatives_wanted
@@ -533,8 +533,8 @@ def test_stack_particles(template_data):
     for instance_index, template_index in enumerate(template_indices):
         particle_offset = particle_offsets[instance_index]
         for particle_index in range(template_sizes[template_index]):
-            combined_mass = combined_system.getParticleMass(particle_offset + particle_index).value_in_unit_system(openmm.unit.md_unit_system)
-            reference_mass = templates[template_index].getParticleMass(particle_index).value_in_unit_system(openmm.unit.md_unit_system)
+            combined_mass = multiopenmm.support.strip_units(combined_system.getParticleMass(particle_offset + particle_index))
+            reference_mass = multiopenmm.support.strip_units(templates[template_index].getParticleMass(particle_index))
             assert combined_mass == pytest.approx(reference_mass / temperature_scales[instance_index])
 
 @pytest.mark.parametrize("template_data", HELP_TEMPLATE_SIZES_INDICES_PARTICLES)

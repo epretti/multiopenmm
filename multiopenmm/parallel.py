@@ -412,7 +412,7 @@ class Simulation:
         Returns
         -------
         array of float
-            For each specified instance, its `(3, 3)` matrix of periodic box
+            For each specified instance, its ``(3, 3)`` matrix of periodic box
             vector components, in row vector form.
 
         See also
@@ -436,7 +436,7 @@ class Simulation:
         Returns
         -------
         array of float
-            For each specified instance, its `(instance_size, 3)` position
+            For each specified instance, its ``(instance_size, 3)`` position
             coordinates.  The arrays of coordinates for all instances will be
             concatenated.
 
@@ -461,7 +461,7 @@ class Simulation:
         Returns
         -------
         array of float
-            For each specified instance, its `(instance_size, 3)` velocity
+            For each specified instance, its ``(instance_size, 3)`` velocity
             components.  The arrays of components for all instances will be
             concatenated.
 
@@ -1006,7 +1006,7 @@ class Simulation:
             numpy.array([kinetic_energies[index] for index in indices]),
         )
 
-    def integrate(self, step_count, write_start=None, write_stop=None, write_step=None, write_energy=False, broadcast_energies=False, indices=None):
+    def integrate(self, step_count, write_start=None, write_stop=None, write_step=None, write_velocities=False, write_energies=False, broadcast_energies=False, indices=None):
         """
         Runs molecular dynamics for the specified instances, and updates
         periodic box vector components, position coordinates, and velocity
@@ -1023,8 +1023,10 @@ class Simulation:
         write_step : int, optional
             The interval in steps at which to write positions after the first
             step at which positions have been written.
-        write_energy : bool, optional
-            Whether or not to write potential energies with positions.
+        write_velocities : bool, optional
+            Whether or not to write velocities with positions.
+        write_energies : bool, optional
+            Whether or not to write potential and kinetic energies with positions.
         broadcast_energies : bool, optional
             Whether or not to return potential energies evaluated by
             broadcasting the positions of each instance in turn to all
@@ -1070,8 +1072,11 @@ class Simulation:
             if write_step < 1:
                 raise ValueError("write_step must be positive")
 
-        if not isinstance(write_energy, bool):
-            raise TypeError("write_energy must be a bool")
+        if not isinstance(write_velocities, bool):
+            raise TypeError("write_velocities must be a bool")
+
+        if not isinstance(write_energies, bool):
+            raise TypeError("write_energies must be a bool")
 
         if write_start is None and write_stop is None and write_step is None:
             write_start = write_stop = 0
@@ -1104,7 +1109,7 @@ class Simulation:
                 broadcast_energies,
                 system_data["enforce_periodic"],
                 system_data["center_coordinates"],
-                (simulation.Command.INTEGRATE, support.Arguments(step_count, write_start, write_stop, write_step, write_energy)),
+                (simulation.Command.INTEGRATE, support.Arguments(step_count, write_start, write_stop, write_step, write_velocities, write_energies)),
             )
             for stack, system_data in combined_systems.items())), combined_systems.values()):
 
@@ -1707,8 +1712,8 @@ class ExchangePairGenerator(abc.ABC):
         Notes
         -----
         This method must be implemented in derived classes.  It should be
-        assumed that instance indices increase sequentially from `0` to
-        `iteration_index - 1`.
+        assumed that instance indices increase sequentially from ``0`` to
+        ``iteration_index - 1``.
         """
 
         raise NotImplementedError
@@ -1725,8 +1730,8 @@ class RandomAdjacentExchangePairGenerator(ExchangePairGenerator):
         per call to :py:meth:`generate`).
     with_replacement : bool, optional
         Whether or not the same swap should be attempted more than once in a set
-        (`False` by default).  If not, `swap_count` must be less than the number
-        of instances undergoing replica exchange.
+        (``False`` by default).  If not, ``swap_count`` must be less than the
+        number of instances undergoing replica exchange.
     """
 
     __slots__ = ("__swap_count", "__with_replacement")
@@ -1780,16 +1785,18 @@ class AcceptanceCriterion(abc.ABC):
     __slots__ = ()
 
     @abc.abstractmethod
-    def probability(self, npt, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
+    def probability(self, use_pressure, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
         """
         Calculates the probability that a replica exchange swap between two
         replicas (:math:`i` and :math:`j`) should occur.
 
         Parameters
         ----------
-        npt : bool
-            `True` for simulations in the isothermal-isobaric ensemble, `False`
-            for simulations in the canonical ensemble.
+        use_pressure : bool
+            ``True`` if a pressure/volume term should be included in the
+            acceptance criterion using the given values, ``False`` if the
+            pressure and volume values should be ignored and such a term should
+            not be included.
         beta_i : float
             :math:`\\beta_i=1/k_BT_i` where :math:`T_i` is the temperature of
             replica :math:`i`.
@@ -1801,13 +1808,22 @@ class AcceptanceCriterion(abc.ABC):
         u_j : float
             :math:`U_j`, the potential energy of replica :math:`j`.
         p_i : float
-            :math:`P_i`, the potential energy of replica :math:`i`.
+            :math:`P_i`, the pressure in replica :math:`i`.
         p_j : float
-            :math:`P_j`, the potential energy of replica :math:`j`.
+            :math:`P_j`, the pressure in replica :math:`j`.
         v_i : float
-            :math:`V_i`, the potential energy of replica :math:`i`.
+            :math:`V_i`, the volume of replica :math:`i`.
         v_j : float
-            :math:`V_j`, the potential energy of replica :math:`j`.
+            :math:`V_j`, the volume of replica :math:`j`.
+
+        Returns
+        -------
+        float
+            The probability that the swap should be carried out.  This value
+            should normally be between 0 and 1, although values less than 0 will
+            be interpreted as 0 (*i.e.*, the swap will never occur under any
+            condition) and values greater than 1 will be interpreted as 1
+            (*i.e.*, the swap will occur unconditionally).
         """
 
         raise NotImplementedError
@@ -1829,10 +1845,10 @@ class MetropolisAcceptanceCriterion(AcceptanceCriterion):
 
     __slots__ = ()
 
-    def probability(self, npt, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
+    def probability(self, use_pressure, beta_i, beta_j, u_i, u_j, p_i, p_j, v_i, v_j):
         """
         Calculates the probability that a replica exchange swap between two
         replicas (:math:`i` and :math:`j`) should occur.
         """
 
-        return numpy.exp(min(0, (beta_j - beta_i) * (u_j - u_i) + ((beta_j * p_j - beta_i * p_i) * (v_j - v_i) if npt else 0)))
+        return numpy.exp(min(0, (beta_j - beta_i) * (u_j - u_i) + ((beta_j * p_j - beta_i * p_i) * (v_j - v_i) if use_pressure else 0)))

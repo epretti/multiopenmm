@@ -49,7 +49,7 @@ class Manager(abc.ABC):
         multiopenmm.PlatformData: Custom platform information to be used at
         context creation.
 
-        If `None`, OpenMM will be permitted to choose a default platform and
+        If ``None``, OpenMM will be permitted to choose a default platform and
         platform parameters when creating contexts.
         """
 
