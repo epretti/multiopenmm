@@ -163,7 +163,7 @@ class Simulation:
 
         self.__manager = manager
         self.__ensemble = ensemble
-        self.__precision = precision
+        self.__precision = Precision(precision)
 
         self.__rng = numpy.random.default_rng(seed)
 
@@ -812,6 +812,9 @@ class Simulation:
         if not isinstance(velocities, bool):
             raise TypeError("velocities must be a bool")
 
+        positions = bool(positions)
+        velocities = bool(velocities)
+
         indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
         combined_systems = self.__get_combined_systems(indices)
 
@@ -863,13 +866,17 @@ class Simulation:
 
         if tolerance is None:
             tolerance = DEFAULT_MINIMIZE_TOLERANCE
-        elif not isinstance(tolerance, float):
-            raise TypeError("tolerance must be a float or None")
+        else:
+            if not isinstance(tolerance, (int, float)):
+                raise TypeError("tolerance must be an int, float or None")
+            tolerance = float(tolerance)
 
         if iteration_count is None:
             iteration_count = DEFAULT_MINIMIZE_ITERATION_COUNT
-        elif not isinstance(iteration_count, int):
-            raise TypeError("iteration_count must be an int or None")
+        else:
+            if not isinstance(iteration_count, int):
+                raise TypeError("iteration_count must be an int or None")
+            iteration_count = int(iteration_count)
         
         indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
         combined_systems = self.__get_combined_systems(indices)
@@ -1051,32 +1058,42 @@ class Simulation:
 
         if not isinstance(step_count, int):
             raise TypeError("step_count must be an int")
+        step_count = int(step_count)
         if step_count < 0:
             raise ValueError("step_count must be non-negative")
 
         if write_start is not None:
             if not isinstance(write_start, int):
                 raise TypeError("write_start must be an int")
+            write_start = int(write_start)
             if write_start < 0:
                 raise ValueError("write_start must be non-negative")
 
         if write_stop is not None:
             if not isinstance(write_stop, int):
                 raise TypeError("write_stop must be an int")
+            write_stop = int(write_stop)
             if write_stop < 0:
                 raise ValueError("write_stop must be non-negative")
 
         if write_step is not None:
             if not isinstance(write_step, int):
                 raise TypeError("write_step must be an int")
+            write_step = int(write_step)
             if write_step < 1:
                 raise ValueError("write_step must be positive")
 
         if not isinstance(write_velocities, bool):
             raise TypeError("write_velocities must be a bool")
+        write_velocities = bool(write_velocities)
 
         if not isinstance(write_energies, bool):
             raise TypeError("write_energies must be a bool")
+        write_energies = bool(write_energies)
+
+        if not isinstance(broadcast_energies, bool):
+            raise TypeError("broadcast_energies must be a bool")
+        broadcast_energies = bool(broadcast_energies)
 
         if write_start is None and write_stop is None and write_step is None:
             write_start = write_stop = 0
@@ -1160,8 +1177,168 @@ class Simulation:
         else:
             return integration_result
     
-    def replica_exchange(self, pair_generator, acceptance_criterion, step_count, result_path, write_start=None, write_stop=None, write_step=None, exchange_start=None, exchange_stop=None, exchange_step=None):
+    def replica_exchange(self, pair_generator, acceptance_criterion, step_count, result_path, write_start=None, write_stop=None, write_step=None, exchange_start=None, exchange_stop=None, exchange_step=None, write_velocities=False, indices=None):
+        """
+        Runs replica exchange molecular dynamics for the specified instances,
+        and updates periodic box vector components, position coordinates, and
+        velocity components.
 
+        Parameters
+        ----------
+        pair_generator : ExchangePairGenerator
+            The algorithm to use for proposing pairs of replicas to exchange.
+        acceptance_criterion : AcceptanceCriterion
+            The algorithm to use for determining whether or not a proposed swap
+            between a pair of replicas should take place.
+        step_count : int
+            Number of steps over which to integrate.
+        result_path : str
+            A path to which to write integration results.
+        write_start : int, optional
+            The index of the first step at which to write positions.
+        write_stop : int, optional
+            The index of the first step at which to cease writing positions.
+        write_step : int, optional
+            The interval in steps at which to write positions after the first
+            step at which positions have been written.
+        exchange_start : int, optional
+            The index of the first step at which to perform replica exchange
+            attempts.
+        exchange_stop : int, optional
+            The index of the first step at which to cease performing replica
+            exchange attempts.
+        exchange_step : int, optional
+            The interval in steps at which to perform replica exchange attempts
+            after the first step at which replica exchange attempts have been
+            performed.
+        write_velocities : bool, optional
+            Whether or not to write velocities with positions.
+        indices : int, slice, array of int, or array of bool, optional
+            Specification of instances.  By default, all instances will be
+            selected.
+
+        Notes
+        -----
+        If neither ``write_start``, ``write_stop``, nor ``write_step`` are
+        given, no writing will occur.  Otherwise, writing will occur at the
+        steps corresponding to a slice constructed from the given parameters.
+        Likewise, if neither ``exchange_start``, ``exchange_stop``, nor
+        ``exchange_step`` are given, no replica exchange attempts will be
+        performed.  Otherwise, replica exchange attempts will be performed at
+        the steps corresponding to a slice constructed from these parameters.
+        """
+
+        if not isinstance(pair_generator, ExchangePairGenerator):
+            raise TypeError("pair_generator must be an ExchangePairGenerator")
+
+        if not isinstance(acceptance_criterion, AcceptanceCriterion):
+            raise TypeError("acceptance_criterion must be an AcceptanceCriterion")
+
+        if not isinstance(step_count, int):
+            raise TypeError("step_count must be an int")
+        step_count = int(step_count)
+        if step_count < 0:
+            raise ValueError("step_count must be non-negative")
+
+        if not isinstance(result_path, str):
+            raise TypeError("result_path must be a str")
+
+        if write_start is not None:
+            if not isinstance(write_start, int):
+                raise TypeError("write_start must be an int")
+            write_start = int(write_start)
+            if write_start < 0:
+                raise ValueError("write_start must be non-negative")
+
+        if write_stop is not None:
+            if not isinstance(write_stop, int):
+                raise TypeError("write_stop must be an int")
+            write_stop = int(write_stop)
+            if write_stop < 0:
+                raise ValueError("write_stop must be non-negative")
+
+        if write_step is not None:
+            if not isinstance(write_step, int):
+                raise TypeError("write_step must be an int")
+            write_step = int(write_step)
+            if write_step < 1:
+                raise ValueError("write_step must be positive")
+
+        if exchange_start is not None:
+            if not isinstance(exchange_start, int):
+                raise TypeError("exchange_start must be an int")
+            exchange_start = int(exchange_start)
+            if exchange_start < 0:
+                raise ValueError("exchange_start must be non-negative")
+
+        if exchange_stop is not None:
+            if not isinstance(exchange_stop, int):
+                raise TypeError("exchange_stop must be an int")
+            exchange_stop = int(exchange_stop)
+            if exchange_stop < 0:
+                raise ValueError("exchange_stop must be non-negative")
+
+        if exchange_step is not None:
+            if not isinstance(exchange_step, int):
+                raise TypeError("exchange_step must be an int")
+            exchange_step = int(exchange_step)
+            if exchange_step < 1:
+                raise ValueError("exchange_step must be positive")
+
+        if not isinstance(write_velocities, bool):
+            raise TypeError("write_velocities must be a bool")
+        write_velocities = bool(write_velocities)
+
+        if write_start is None and write_stop is None and write_step is None:
+            write_start = write_stop = 0
+            write_step = 1
+
+        if exchange_start is None and exchange_stop is None and exchange_step is None:
+            exchange_start = exchange_stop = 0
+            exchange_step = 1
+
+        # Select the unique indices requested.
+        indices = numpy.unique(self.__resolve_with_size(self.__instance_count, indices))
+
+        # Prepare to calculate when writing needs to take place.
+        write_range = range(step_count + 1)[write_start:write_stop:write_step]
+
+        def slice_write_range(start, stop):
+            # Return parameters defining a range that is a subset of write_range
+            # having values greater than or equal to start and less than stop,
+            # offset by start.
+            index_start = max(0, (start - write_range.start + write_range.step - 1) // write_range.step)
+            index_stop = min(len(write_range), (stop - write_range.start + write_range.step - 1) // write_range.step)
+            sliced_range = write_range[index_start:index_stop]
+            return range(sliced_range.start - start, sliced_range.stop - start, sliced_range.step)
+
+        # Keep track of how many steps we have integrated so far.
+        step_index = 0
+
+        # TODO: See if indices can be evaluated directly or if broadcasting will be
+        # needed.
+        raise NotImplementedError
+
+        for exchange_index in range(step_count + 1)[exchange_start:exchange_stop:exchange_step]:
+            # See what step we are at, what step we need to get to to make the
+            # next exchange attempt, and how many steps we need to simulate to
+            # get there.
+            integrate_count = exchange_index - step_index
+            if integrate_count:
+                self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, ..., ..., indices)
+            step_index += integrate_count
+
+            # TODO: Call to perform swapping.
+            raise NotImplementedError
+
+        # Finish if we have additional steps to simulate after the last exchange
+        # attempt.  Even if we advance zero steps, there may be a final frame to
+        # write (hence, the stopping index for slicing the writing range is
+        # incremented by one to include it).
+        integrate_count = step_count - step_index
+        self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count + 1), write_velocities, ..., ..., indices)
+
+        # TODO: Collect and return results.
         raise NotImplementedError
 
     def __update_instance_data(self):
@@ -1535,7 +1712,7 @@ class CanonicalEnsemble(Ensemble):
         if not isinstance(thermostat, Thermostat):
             raise TypeError("thermostat must be a Thermostat")
 
-        self.__thermostat = thermostat
+        self.__thermostat = Thermostat(thermostat)
 
     @property
     def thermostat(self):
@@ -1594,8 +1771,8 @@ class IsothermalIsobaricEnsemble(Ensemble):
         if not isinstance(barostat, Barostat):
             raise TypeError("barostat must be a Barostat")
 
-        self.__thermostat = thermostat
-        self.__barostat = barostat
+        self.__thermostat = Thermostat(thermostat)
+        self.__barostat = Barostat(barostat)
 
     @property
     def thermostat(self):
