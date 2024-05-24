@@ -144,3 +144,17 @@ class SynchronousManager(Manager):
             return data
         else:
             raise data
+
+class SocketServerManager(Manager):
+    """
+    A task manager supporting execution of multiple tasks through a socket
+    server.  Any number of clients can connect to the server, and tasks will be
+    distributed among the available clients.  Clients may be connected while the
+    server is running and other clients are processing tasks; new tasks will be
+    distributed to the new clients as well as the existing ones.  Clients may be
+    disconnected while they are idle or busy; interrupted tasks will be
+    redispatched to other clients.  Results are made available as they are
+    returned from clients.
+    """
+
+    raise NotImplementedError
