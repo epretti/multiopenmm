@@ -116,7 +116,7 @@ class ContextData:
         if platform_data is None:
             context = openmm.Context(system, integrator)
         else:
-            context = openmm.Context(system, integrator, platform_data.platform_name, platform_data.platform_properties)
+            context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName(platform_data.platform_name), platform_data.platform_properties)
 
         return context
 
