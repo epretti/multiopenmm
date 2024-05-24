@@ -29,6 +29,10 @@ def help_check_equal(array_1, array_2):
     assert array_1.shape == array_2.shape
     assert numpy.all(array_1 == array_2)
 
+def help_check_changed(array_1, array_2):
+    assert array_1.shape == array_2.shape
+    assert numpy.any(array_1 != array_2)
+
 def help_check_equal_none(array_1, array_2):
     if array_1 is None and array_2 is None:
         return

@@ -26,6 +26,8 @@ import multiopenmm
 import numpy
 import openmm
 import pytest
+import scipy
+import tempfile
 
 HELP_TEMPLATE_SIZES = (
     (),
@@ -94,6 +96,11 @@ HELP_INDICES_SPEC = (
 )
 
 HELP_EPSILON = numpy.sqrt(numpy.finfo(numpy.single).eps * numpy.finfo(numpy.double).eps)
+
+HELP_K_B = openmm.unit.BOLTZMANN_CONSTANT_kB.value_in_unit_system(openmm.unit.md_unit_system) * \
+    openmm.unit.AVOGADRO_CONSTANT_NA.value_in_unit_system(openmm.unit.md_unit_system) 
+
+HELP_P_LIMIT = 1e-3
 
 def help_get_rng_bytes(simulation):
     return simulation._Simulation__rng.bytes(256)
@@ -791,30 +798,482 @@ def test_simulation_dump_load_precision(simulation_precision, dump_precision):
     helpers_test.help_check_equal(simulation.get_positions().astype(numpy.double), (single_positions if single else double_positions).astype(numpy.double))
     helpers_test.help_check_equal(simulation.get_velocities().astype(numpy.double), (single_velocities if single else double_velocities).astype(numpy.double))
 
-@pytest.mark.xfail
-def test_simulation_apply_constraints():
-    # TODO: Test Simulation.apply_constraints().
-    raise NotImplementedError
+@pytest.mark.parametrize("positions", (None, object(), 0, 1, 2))
+def test_simulation_apply_constraints_positions_type(positions):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.apply_constraints(positions=positions)
+
+@pytest.mark.parametrize("velocities", (None, object(), 0, 1, 2))
+def test_simulation_apply_constraints_velocities_type(velocities):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.apply_constraints(velocities=velocities)
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("positions_option", (False, True))
+@pytest.mark.parametrize("velocities_option", (False, True))
+@pytest.mark.parametrize("indices_option", ([], [0, 1, 2, 3, 4], [0], [0, 2], [0, 1, 2]))
+def test_simulation_apply_constraints(stacks, positions_option, velocities_option, indices_option):
+    templates = tuple(helpers_test.help_make_templates((2, 2)))
+    template_indices = (0, 0, 1, 1, 1)
+    distances = (1.3, 1.7)
+    for template, distance in zip(templates, distances, strict=True):
+        template.addConstraint(0, 1, distance)
+    
+    simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    simulation.instance_count = 5
+    simulation.set_template_indices(template_indices)
+    simulation.set_stacks(stacks)
+    simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+    simulation.set_property_values("constraint_tolerance", 1e-8)
+
+    positions_initial = numpy.array(((-1, 0, 0), (1, 0, 0),) * 5)
+    velocities_initial = numpy.array(((-1, 1, 0), (1, -1, 0),) * 5)
+
+    simulation.set_positions(positions_initial)
+    simulation.set_velocities(velocities_initial)
+
+    simulation.apply_constraints(positions_option, velocities_option, indices_option)
+
+    positions_final = simulation.get_positions()
+    velocities_final = simulation.get_velocities()
+
+    if positions_option:
+        for index in range(5):
+            if index in indices_option:
+                helpers_test.help_check_changed(positions_final[2 * index:2 * (index + 1)], positions_initial[2 * index:2 * (index + 1)])
+                assert numpy.linalg.norm(positions_final[2 * index + 1] - positions_final[2 * index]) == pytest.approx(distances[template_indices[index]])
+            else:
+                helpers_test.help_check_equal(positions_final[2 * index:2 * (index + 1)], positions_initial[2 * index:2 * (index + 1)])
+    else:
+        helpers_test.help_check_equal(positions_final, positions_initial)
+
+    if velocities_option:
+        for index in range(5):
+            if index in indices_option:
+                helpers_test.help_check_changed(velocities_final[2 * index:2 * (index + 1)], velocities_initial[2 * index:2 * (index + 1)])
+                assert velocities_final[2 * index:2 * (index + 1), 0] == pytest.approx(0)
+            else:
+                helpers_test.help_check_equal(velocities_final[2 * index:2 * (index + 1)], velocities_initial[2 * index:2 * (index + 1)])
+    else:
+        helpers_test.help_check_equal(velocities_final, velocities_initial)
+
+@pytest.mark.parametrize("tolerance", (object(), 1j))
+def test_simulation_minimize_tolerance_type(tolerance):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.minimize(tolerance=tolerance)
+
+@pytest.mark.parametrize("iteration_count", (object(), 1.0))
+def test_simulation_minimize_iteration_count_type(iteration_count):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.minimize(iteration_count=iteration_count)
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices_option", ([], [0, 1, 2, 3, 4], [0], [0, 2], [0, 1, 2], [0, 0, 1, 2, 0]))
+@pytest.mark.parametrize("tolerance_data", ((None, False), (1e3, False), (1000, False), (1e-8, True)))
+@pytest.mark.parametrize("iteration_count_data", ((None, True), (0, True), (1, False), (100, True)))
+def test_simulation_minimize(stacks, indices_option, tolerance_data, iteration_count_data):
+    tolerance, tolerance_should_minimize = tolerance_data
+    iteration_count, iteration_count_should_minimize = iteration_count_data
+
+    templates = tuple(helpers_test.help_make_templates((2, 2)))
+    template_indices = (0, 0, 1, 1, 1)
+    distances = (1.3, 1.7)
+    for template, distance in zip(templates, distances, strict=True):
+        force = openmm.HarmonicBondForce()
+        force.addBond(0, 1, distance, 1000)
+        template.addForce(force)
+    
+    simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    simulation.instance_count = 5
+    simulation.set_template_indices(template_indices)
+    simulation.set_stacks(stacks)
+    simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+
+    positions_initial = numpy.array(((-1, 0, 0), (1, 0, 0),) * 5)
+    velocities_initial = numpy.ones((10, 3))
+
+    simulation.set_positions(positions_initial)
+    simulation.set_velocities(velocities_initial)
+
+    simulation.minimize(tolerance, iteration_count, indices_option)
+
+    positions_final = simulation.get_positions()
+    velocities_final = simulation.get_velocities()
+
+    for index in range(5):
+        if index in indices_option:
+            if tolerance_should_minimize and iteration_count_should_minimize:
+                helpers_test.help_check_changed(positions_final[2 * index:2 * (index + 1)], positions_initial[2 * index:2 * (index + 1)])
+                assert numpy.linalg.norm(positions_final[2 * index + 1] - positions_final[2 * index]) == pytest.approx(distances[template_indices[index]])
+        else:
+            helpers_test.help_check_equal(positions_final[2 * index:2 * (index + 1)], positions_initial[2 * index:2 * (index + 1)])
+
+    helpers_test.help_check_equal(velocities_final, velocities_initial)
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices_option", ([], [0, 1, 2, 3, 4], [0], [0, 2], [0, 1, 2], [0, 0, 1, 2, 0]))
+def test_simulation_maxwell_boltzmann(stacks, indices_option):
+    templates = tuple(helpers_test.help_make_templates((2, 2)))
+    template_indices = (0, 0, 1, 1, 1)
+
+    simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    simulation.instance_count = 5
+    simulation.set_template_indices(template_indices)
+    simulation.set_stacks(stacks)
+    simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+
+    positions_initial = numpy.ones((10, 3))
+    velocities_initial = numpy.ones((10, 3))
+
+    simulation.set_positions(positions_initial)
+    simulation.set_velocities(velocities_initial)
+
+    simulation.maxwell_boltzmann(indices_option)
+
+    positions_final = simulation.get_positions()
+    velocities_final = simulation.get_velocities()
+
+    helpers_test.help_check_equal(positions_final, positions_initial)
+
+    for index in range(5):
+        if index in indices_option:
+            helpers_test.help_check_changed(velocities_final[2 * index:2 * (index + 1)], velocities_initial[2 * index:2 * (index + 1)])
+        else:
+            helpers_test.help_check_equal(velocities_final[2 * index:2 * (index + 1)], velocities_initial[2 * index:2 * (index + 1)])
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices", ((), (0, 1, 2, 3, 4), (0,), (0, 2), (0, 1, 2), (0, 0, 1, 2, 0)))
+def test_simulation_maxwell_boltzmann_distribution(stacks, indices):
+    rng = numpy.random.default_rng((0x333d8d3758be649d, helpers_test.help_deterministic_hash((stacks, indices))))
+
+    template_indices = (0, 0, 1, 1, 1)
+    temperatures = rng.uniform(100, 500, len(template_indices))
+    beta = 1 / (HELP_K_B * temperatures)
+    template_particle_counts = (1000, 2000)
+    template_particle_masses = []
+
+    templates = tuple(helpers_test.help_make_templates(template_particle_counts))
+    for template, template_particle_count in zip(templates, template_particle_counts, strict=True):
+        particle_masses = rng.uniform(1, 2, template_particle_count)
+        for particle_index, particle_mass in enumerate(particle_masses):
+            template.setParticleMass(particle_index, particle_mass)
+        template_particle_masses.append(particle_masses)
+    
+    simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble(), seed=rng)
+    simulation.instance_count = len(template_indices)
+    simulation.set_template_indices(template_indices)
+    simulation.set_stacks(stacks)
+    simulation.set_property_values("temperature", temperatures)
+
+    simulation.maxwell_boltzmann(list(indices))
+
+    for index in range(len(template_indices)):
+        if index in indices:
+            scaled_velocities = simulation.get_velocities(index) * numpy.sqrt(template_particle_masses[template_indices[index]])[:, None]
+            for dimension_1 in range(3):
+                assert scipy.stats.ks_1samp(scaled_velocities[:, dimension_1],
+                    scipy.stats.norm(loc=0, scale=1 / numpy.sqrt(beta[index])).cdf).pvalue >= HELP_P_LIMIT
+
+                for dimension_2 in range(3):
+                    if dimension_2 != dimension_1:
+                        assert scipy.stats.pearsonr(scaled_velocities[:, dimension_1], scaled_velocities[:, dimension_2]).pvalue >= HELP_P_LIMIT
+
+    for template_index in template_indices:
+        for index_1 in range(len(template_indices)):
+            if index_1 in indices and template_indices[index_1] == template_index:
+                velocities_1 = simulation.get_velocities(index_1)
+
+                for index_2 in range(len(template_indices)):
+                    if index_2 in indices and template_indices[index_2] == template_index and index_2 != index_1:
+                        velocities_2 = simulation.get_velocities(index_2)
+
+                        for dimension_1 in range(3):
+                            for dimension_2 in range(3):
+                                assert scipy.stats.pearsonr(velocities_1[:, dimension_1], velocities_2[:, dimension_2]).pvalue >= HELP_P_LIMIT
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices", ((), (0, 1, 2, 3, 4), (0,), (0, 2), (0, 1, 2), (0, 0, 1, 2, 0)))
+def test_simulation_evaluate_energies(stacks, indices):
+    rng = numpy.random.default_rng((0xf1c2dceb363c7c52, helpers_test.help_deterministic_hash((stacks, indices))))
+
+    template_indices = (0, 0, 1, 1, 1)
+    temperatures = rng.uniform(100, 500, len(template_indices))
+    beta = 1 / (HELP_K_B * temperatures)
+    template_particle_counts = (1000, 2000)
+    template_particle_masses = []
+
+    templates = tuple(helpers_test.help_make_templates(template_particle_counts))
+    for template, template_particle_count in zip(templates, template_particle_counts, strict=True):
+        particle_masses = rng.uniform(1, 2, template_particle_count)
+        for particle_index, particle_mass in enumerate(particle_masses):
+            template.setParticleMass(particle_index, particle_mass)
+        template_particle_masses.append(particle_masses)
+
+        force = openmm.CustomExternalForce("x^2 + y^2 + z^2")
+        for particle_index, particle_mass in enumerate(particle_masses):
+            force.addParticle(particle_index)
+        template.addForce(force)
+    
+    simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble(), seed=rng)
+    simulation.instance_count = len(template_indices)
+    simulation.set_template_indices(template_indices)
+    simulation.set_stacks(stacks)
+    simulation.set_property_values("temperature", temperatures)
+
+    positions_zero = simulation.get_positions()
+    velocities_zero = simulation.get_velocities()
+    positions_nonzero = rng.normal(size=positions_zero.shape)
+    velocities_nonzero = rng.normal(size=velocities_zero.shape)
+
+    simulation.set_positions(positions_nonzero)
+    instance_positions = [simulation.get_positions(index) for index in range(len(template_indices))]
+
+    potential_energies, kinetic_energies = simulation.evaluate_energies(list(indices))
+    for index, potential_energy in zip(indices, potential_energies, strict=True):
+        assert potential_energy == pytest.approx(numpy.sum(simulation.get_positions(index) ** 2))
+
+    simulation.set_positions(positions_zero)
+    simulation.set_velocities(velocities_nonzero)
+
+    potential_energies, kinetic_energies = simulation.evaluate_energies(list(indices))
+    for index, potential_energy, kinetic_energy in zip(indices, potential_energies, kinetic_energies, strict=True):
+        assert potential_energy == pytest.approx(0)
+        assert kinetic_energy == pytest.approx(numpy.sum(template_particle_masses[template_indices[index]][:, None] * simulation.get_velocities(index) ** 2) / 2)
+
+@pytest.mark.parametrize("step_count", (object(), None, 1.0))
+def test_simulation_integrate_step_count_type(step_count):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(step_count)
+
+@pytest.mark.parametrize("step_count", (-10, -1))
+def test_simulation_integrate_step_count_value(step_count):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.integrate(step_count)
+
+@pytest.mark.parametrize("write_start", (object(), 1.0))
+def test_simulation_integrate_write_start_type(write_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, write_start=write_start)
+
+@pytest.mark.parametrize("write_start", (-10, -1))
+def test_simulation_integrate_write_start_value(write_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.integrate(1, write_start=write_start)
+
+@pytest.mark.parametrize("write_stop", (object(), 1.0))
+def test_simulation_integrate_write_stop_type(write_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, write_stop=write_stop)
+
+@pytest.mark.parametrize("write_stop", (-10, -1))
+def test_simulation_integrate_write_stop_value(write_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.integrate(1, write_stop=write_stop)
+
+@pytest.mark.parametrize("write_step", (object(), 1.0))
+def test_simulation_integrate_write_step_type(write_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, write_step=write_step)
+
+@pytest.mark.parametrize("write_step", (-10, -1, 0))
+def test_simulation_integrate_write_step_value(write_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.integrate(1, write_step=write_step)
+
+@pytest.mark.parametrize("write_velocities", (object(), None, 0, 1, 1.0))
+def test_simulation_integrate_write_velocities_type(write_velocities):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, write_velocities=write_velocities)
+
+@pytest.mark.parametrize("write_energies", (object(), None, 0, 1, 1.0))
+def test_simulation_integrate_write_energies_type(write_energies):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, write_energies=write_energies)
+
+@pytest.mark.parametrize("broadcast_energies", (object(), None, 0, 1, 1.0))
+def test_simulation_integrate_broadcast_energies_type(broadcast_energies):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.integrate(1, broadcast_energies=broadcast_energies)
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices", ((), (0, 1, 2, 3, 4), (0,), (0, 2), (0, 1, 2), (0, 0, 1, 2, 0)))
+@pytest.mark.parametrize("step_count", (0, 1, 2, 10))
+@pytest.mark.parametrize("write_velocities", (False, True))
+@pytest.mark.parametrize("write_energies", (False, True))
+@pytest.mark.parametrize("broadcast_energies", (False, True))
+def test_simulation_integrate_options(stacks, indices, step_count, write_velocities, write_energies, broadcast_energies):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            templates = tuple(helpers_test.help_make_templates((2, 3)))
+            template_indices = (0, 0, 1, 1, 1)
+
+            simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = len(template_indices)
+            simulation.set_template_indices(template_indices)
+            simulation.set_stacks(stacks)
+            simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+
+            simulation.set_positions(numpy.linspace(0, 3.8, 39).reshape(13, 3))
+            simulation.set_velocities(numpy.linspace(3.9, 7.7, 39).reshape(13, 3))
+
+            positions_initial = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+            velocities_initial = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+            integration_result = simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=1,
+                write_velocities=write_velocities, write_energies=write_energies, broadcast_energies=broadcast_energies, indices=list(indices))
+            if broadcast_energies:
+                integration_result, broadcast_result = integration_result
+
+            positions_final = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+            velocities_final = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+            for index in range(len(template_indices)):
+                if index in indices and step_count:
+                    helpers_test.help_check_changed(positions_final[index], positions_initial[index])
+                    helpers_test.help_check_changed(velocities_final[index], velocities_initial[index])
+                else:
+                    helpers_test.help_check_equal(positions_final[index], positions_initial[index])
+                    helpers_test.help_check_equal(velocities_final[index], velocities_initial[index])
+
+            class TestExporter(multiopenmm.export.Exporter):
+                def export(self, get_frames):
+                    self.data = tuple(tuple(get_frames(index)) for index in range(len(template_indices)))
+            exporter = TestExporter()
+            multiopenmm.export_results((integration_result,), (exporter,))
+            data = exporter.data
+
+            for index in range(len(template_indices)):
+                if index in indices:
+                    assert len(data[index]) == step_count + 1
+                    for frame in data[index]:
+                        assert "vectors" in frame
+                        assert "positions" in frame
+                        assert ("velocities" in frame) == write_velocities
+                        assert ("potential_energy" in frame) == write_energies
+                        assert ("kinetic_energy" in frame) == write_energies
+                else:
+                    assert data[index] == ()
+
+            if broadcast_energies:
+                assert broadcast_result.size == len(indices)
+
+    finally:
+        multiopenmm.set_scratch_directory()
+
+@pytest.mark.parametrize("step_count", (0, 1, 2, 100))
+@pytest.mark.parametrize("write_start", ((0, 1, 2, 3, 19, 99, 100, 101, 137)))
+@pytest.mark.parametrize("write_stop", ((0, 1, 2, 3, 19, 99, 100, 101, 137)))
+@pytest.mark.parametrize("write_step", ((1, 2, 3, 19, 99, 100, 101, 137)))
+def test_simulation_integrate_stepping(step_count, write_start, write_stop, write_step):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            write_count = 0
+            frame = write_start
+            while frame < write_stop:
+                if frame <= step_count:
+                    write_count += 1
+                frame += write_step
+
+            simulation = multiopenmm.Simulation(helpers_test.help_make_templates((1,)), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = 1
+
+            integration_result = simulation.integrate(step_count, write_start=write_start, write_stop=write_stop, write_step=write_step)
+
+            class TestExporter(multiopenmm.export.Exporter):
+                def export(self, get_frames):
+                    self.data = tuple(get_frames(0))
+            exporter = TestExporter()
+            multiopenmm.export_results((integration_result,), (exporter,))
+            data = exporter.data
+
+            assert len(data) == write_count
+            for frame in data:
+                assert "vectors" in frame
+                assert "positions" in frame
+
+    finally:
+        multiopenmm.set_scratch_directory()
+
+@pytest.mark.parametrize("step_count", (0, 1, 2, 100))
+def test_simulation_integrate_beginning_end(step_count):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            simulation = multiopenmm.Simulation(helpers_test.help_make_templates((1,)), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = 1
+
+            simulation.set_positions(numpy.ones(3))
+            simulation.set_velocities(numpy.ones(3))
+
+            initial_positions = simulation.get_positions()
+            initial_velocities = simulation.get_velocities()
+
+            integration_result = simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=max(1, step_count), write_velocities=True)
+
+            final_positions = simulation.get_positions()
+            final_velocities = simulation.get_velocities()
+
+            class TestExporter(multiopenmm.export.Exporter):
+                def export(self, get_frames):
+                    self.data = tuple(get_frames(0))
+            exporter = TestExporter()
+            multiopenmm.export_results((integration_result,), (exporter,))
+            data = exporter.data
+
+            if step_count:
+                assert len(data) == 2
+                initial_positions_check = data[0]["positions"]
+                initial_velocities_check = data[0]["velocities"]
+                final_positions_check = data[1]["positions"]
+                final_velocities_check = data[1]["velocities"]
+            else:
+                assert len(data) == 1
+                initial_positions_check = data[0]["positions"]
+                initial_velocities_check = data[0]["velocities"]
+                final_positions_check = data[0]["positions"]
+                final_velocities_check = data[0]["velocities"]
+
+            helpers_test.help_check_equal(initial_positions_check, initial_positions)
+            helpers_test.help_check_equal(initial_velocities_check, initial_velocities)
+            helpers_test.help_check_equal(final_positions_check, final_positions)
+            helpers_test.help_check_equal(final_velocities_check, final_velocities)
+
+    finally:
+        multiopenmm.set_scratch_directory()
 
 @pytest.mark.xfail
-def test_simulation_minimize():
-    # TODO: Test Simulation.minimize().
+def test_simulation_replica_exchange():
+    # TODO: Test Simulation.replica_exchange().
+    # TODO: test replica exchange options: *ExchangePairGenerator, *AcceptanceCriterion
     raise NotImplementedError
 
-@pytest.mark.xfail
-def test_simulation_maxwell_boltzmann():
-    # TODO: Test Simulation.maxwell_boltzmann().
-    raise NotImplementedError
-
-@pytest.mark.xfail
-def test_simulation_evaluate_energies():
-    # TODO: Test Simulation.evaluate_energies().
-    raise NotImplementedError
-
-@pytest.mark.xfail
-def test_simulation_integrate():
-    # TODO: Test Simulation.integrate().
-    raise NotImplementedError
+# TODO: can we change platforms in the midst of a simulation?
+# TODO: test exporters: export_results, delete_results, *Exporter
+# TODO: test ensembles: Canonical, IsothermalIsobaric, etc., in simulation!
+# TODO: stochastic tests with checkensemble or something like this
+# TODO: test managers: ThreadPool, ProcessPool, SocketServer
+# TODO: basic tutorial in documentation and documentation cleanup
+# TODO: are broadcast energies returned correctly?
 
 @pytest.mark.parametrize("thermostat", multiopenmm.Barostat)
 def test_canonical_ensemble_init_thermostat_type(thermostat):

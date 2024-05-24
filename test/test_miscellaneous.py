@@ -25,6 +25,7 @@ import io
 import multiopenmm
 import numpy
 import os
+import openmm
 import pytest
 import tempfile
 
@@ -82,6 +83,22 @@ def test_manager_set_platform_data(manager_type, manager_test_data):
     manager = manager_type(platform_data_1)
     manager.platform_data = platform_data_2
     assert manager.platform_data == platform_data_2
+
+@pytest.mark.parametrize("manager_type", (multiopenmm.SynchronousManager,))
+def test_manager_pass_platform_name(manager_type):
+    manager = manager_type(multiopenmm.PlatformData("NonexistentPlatform"))
+    simulation = multiopenmm.Simulation(helpers_test.help_make_templates((2,)), manager, multiopenmm.CanonicalEnsemble())
+    simulation.instance_count = 1
+    with pytest.raises(openmm.OpenMMException):
+        simulation.maxwell_boltzmann()
+
+@pytest.mark.parametrize("manager_type", (multiopenmm.SynchronousManager,))
+def test_manager_pass_platform_property(manager_type):
+    manager = manager_type(multiopenmm.PlatformData("Reference", dict(NonexistentProperty="0")))
+    simulation = multiopenmm.Simulation(helpers_test.help_make_templates((2,)), manager, multiopenmm.CanonicalEnsemble())
+    simulation.instance_count = 1
+    with pytest.raises(openmm.OpenMMException):
+        simulation.maxwell_boltzmann()
 
 @pytest.mark.parametrize("args", ((), (1,), (1, 2, 3)))
 @pytest.mark.parametrize("kwargs", (dict(), dict(a=1), dict(a=2), dict(b=1), dict(a=1, b=2)))
