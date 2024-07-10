@@ -1051,7 +1051,7 @@ class Simulation:
 
         Returns
         -------
-        IntegrationResult or (IntegrationResult, array of float)
+        multiopenmm.IntegrationResult or (multiopenmm.IntegrationResult, array of float)
             An object containing information about positions written, and, if
             ``broadcast_energies`` is ``True``, an array of potential energies.
         """
@@ -1142,7 +1142,7 @@ class Simulation:
                     potential_energies[instance_index] = broadcast_energy * broadcast_energy_scale
 
         expected_frame_count = len(range(step_count + 1)[write_start:write_stop:write_step])
-        path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integration_results)))}
+        path_table = {path: path_index for path_index, path in enumerate(sorted(set(path for path, _, _, _ in integration_results), key=support.sort_key_str_or_none))}
 
         path_indices = {}
         byte_offsets = {}
@@ -1177,7 +1177,7 @@ class Simulation:
         else:
             return integration_result
     
-    def replica_exchange(self, pair_generator, acceptance_criterion, step_count, result_path, write_start=None, write_stop=None, write_step=None, exchange_start=None, exchange_stop=None, exchange_step=None, write_velocities=False, indices=None):
+    def replica_exchange(self, pair_generator, acceptance_criterion, step_count, write_start=None, write_stop=None, write_step=None, exchange_start=None, exchange_stop=None, exchange_step=None, write_velocities=False, indices=None):
         """
         Runs replica exchange molecular dynamics for the specified instances,
         and updates periodic box vector components, position coordinates, and
@@ -1185,15 +1185,13 @@ class Simulation:
 
         Parameters
         ----------
-        pair_generator : ExchangePairGenerator
+        pair_generator : multiopenmm.parallel.ExchangePairGenerator
             The algorithm to use for proposing pairs of replicas to exchange.
-        acceptance_criterion : AcceptanceCriterion
+        acceptance_criterion : multiopenmm.parallel.AcceptanceCriterion
             The algorithm to use for determining whether or not a proposed swap
             between a pair of replicas should take place.
         step_count : int
             Number of steps over which to integrate.
-        result_path : str
-            A path to which to write integration results.
         write_start : int, optional
             The index of the first step at which to write positions.
         write_stop : int, optional
@@ -1217,6 +1215,12 @@ class Simulation:
             Specification of instances.  By default, all instances will be
             selected.
 
+        Returns
+        -------
+        list(multiopenmm.IntegrationResult), list(multiopenmm.SwapInformation)
+            Objects containing information about data written during replica
+            exchange simulation, and about attempted swaps.
+
         Notes
         -----
         If neither ``write_start``, ``write_stop``, nor ``write_step`` are
@@ -1239,9 +1243,6 @@ class Simulation:
         step_count = int(step_count)
         if step_count < 0:
             raise ValueError("step_count must be non-negative")
-
-        if not isinstance(result_path, str):
-            raise TypeError("result_path must be a str")
 
         if write_start is not None:
             if not isinstance(write_start, int):
@@ -1307,17 +1308,28 @@ class Simulation:
             # Return parameters defining a range that is a subset of write_range
             # having values greater than or equal to start and less than stop,
             # offset by start.
-            index_start = max(0, (start - write_range.start + write_range.step - 1) // write_range.step)
-            index_stop = min(len(write_range), (stop - write_range.start + write_range.step - 1) // write_range.step)
+            index_start = numpy.clip((start - write_range.start + write_range.step - 1) // write_range.step, 0, len(write_range))
+            index_stop = numpy.clip((stop - write_range.start + write_range.step - 1) // write_range.step, 0, len(write_range))
+            if index_start == index_stop:
+                return None, None, None
             sliced_range = write_range[index_start:index_stop]
-            return range(sliced_range.start - start, sliced_range.stop - start, sliced_range.step)
+            return sliced_range.start - start, sliced_range.stop - start, sliced_range.step
 
-        # Keep track of how many steps we have integrated so far.
+        # Keep track of how many steps we have integrated so far and how many
+        # times we have called for pairs to swap.
         step_index = 0
+        iteration_index = 0
 
-        # TODO: See if indices can be evaluated directly or if broadcasting will be
-        # needed.
-        raise NotImplementedError
+        results = []
+        swap_information = []
+
+        # Check the selected ensemble type.
+        if isinstance(self.__ensemble, CanonicalEnsemble):
+            use_pressure = False
+        elif isinstance(self.__ensemble, IsothermalIsobaricEnsemble):
+            use_pressure = True
+        else:
+            raise RuntimeError("unrecognized ensemble type")
 
         for exchange_index in range(step_count + 1)[exchange_start:exchange_stop:exchange_step]:
             # See what step we are at, what step we need to get to to make the
@@ -1325,21 +1337,54 @@ class Simulation:
             # get there.
             integrate_count = exchange_index - step_index
             if integrate_count:
-                self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, ..., ..., indices)
+                result, broadcasted = self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, True, True, indices)
+                results.append(result)
             step_index += integrate_count
 
-            # TODO: Call to perform swapping.
-            raise NotImplementedError
+            swap_information_data = []
+
+            for instance_index_1, instance_index_2 in pair_generator.generate(self.__rng, iteration_index, indices.size):
+                temperature_1 = self.__property_values["temperature"][instance_index_1]
+                temperature_2 = self.__property_values["temperature"][instance_index_2]
+
+                swap_probability = acceptance_criterion.probability(use_pressure,
+                    1 / (support.K_B * temperature_1),
+                    1 / (support.K_B * temperature_2),
+                    broadcasted[instance_index_1],
+                    broadcasted[instance_index_2],
+                    self.__property_values["pressure"][instance_index_1] if use_pressure else 0,
+                    self.__property_values["pressure"][instance_index_2] if use_pressure else 0,
+                    numpy.abs(numpy.linalg.det(self.__vectors[instance_index_1])),
+                    numpy.abs(numpy.linalg.det(self.__vectors[instance_index_2])),
+                )
+                swap_accepted = self.__rng.uniform() < swap_probability
+
+                if swap_accepted:
+                    get_indices = [instance_index_1, instance_index_2]
+                    set_indices = [instance_index_2, instance_index_1]
+                    self.set_vectors(self.get_vectors(get_indices), set_indices)
+                    self.set_positions(self.get_positions(get_indices), set_indices)
+
+                    scale = numpy.sqrt(temperature_2 / temperature_1)
+                    velocities_1 = self.get_velocities(instance_index_1)
+                    velocities_2 = self.get_velocities(instance_index_2)
+                    self.set_velocities(velocities_1 * scale, instance_index_2)
+                    self.set_velocities(velocities_2 / scale, instance_index_1)
+
+                swap_information_data.append((instance_index_1, instance_index_2, swap_accepted, swap_probability))
+
+            swap_information.append(SwapInformation(len(swap_information_data), *zip(*swap_information_data)))
+
+            iteration_index += 1
 
         # Finish if we have additional steps to simulate after the last exchange
         # attempt.  Even if we advance zero steps, there may be a final frame to
         # write (hence, the stopping index for slicing the writing range is
         # incremented by one to include it).
         integrate_count = step_count - step_index
-        self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count + 1), write_velocities, ..., ..., indices)
+        results.append(self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count + 1), write_velocities, True, False, indices))
 
-        # TODO: Collect and return results.
-        raise NotImplementedError
+        return results, swap_information
 
     def __update_instance_data(self):
         # Updates tables used to slice arrays containing per-particle
@@ -1854,6 +1899,65 @@ class IntegrationResult:
             self.__particle_indices_start,
             self.__particle_indices_end,
         ) = data
+
+class SwapInformation:
+    """
+    Holds details about attempted swaps performed during calls to
+    :py:meth:`multiopenmm.Simulation.replica_exchange`.
+    """
+
+    __slots__ = ("__attempt_count", "__instance_indices_1",
+        "__instance_indices_2", "__accepted", "__probability")
+
+    def __init__(self, attempt_count, instance_indices_1, instance_indices_2, accepted, probability):
+        self.__attempt_count = attempt_count
+        self.__instance_indices_1 = numpy.array(instance_indices_1, dtype=int)
+        self.__instance_indices_2 = numpy.array(instance_indices_2, dtype=int)
+        self.__accepted = numpy.array(accepted, dtype=bool)
+        self.__probability = numpy.array(probability, dtype=float)
+
+    @property
+    def attempt_count(self):
+        """
+        int: The total number of attempted swaps.
+        """
+
+        return self.__attempt_count
+
+    @property
+    def instance_indices_1(self):
+        """
+        array of int: For each swap, the index of the first of the two instances
+        considered.
+        """
+
+        return numpy.array(self.__instance_indices_1)
+
+    @property
+    def instance_indices_2(self):
+        """
+        array of int: For each swap, the index of the second of the two
+        instances considered.
+        """
+
+        return numpy.array(self.__instance_indices_2)
+
+    @property
+    def accepted(self):
+        """
+        array of bool: For each swap, whether or not the swap was executed.
+        """
+
+        return numpy.array(self.__accepted)
+
+    @property
+    def probability(self):
+        """
+        array of float: For each swap, the calculated probability that the swap
+        should be accepted.
+        """
+
+        return numpy.array(self.__probability)
 
 class ExchangePairGenerator(abc.ABC):
     """

@@ -1274,6 +1274,7 @@ def test_simulation_replica_exchange():
 # TODO: test managers: ThreadPool, ProcessPool, SocketServer
 # TODO: basic tutorial in documentation and documentation cleanup
 # TODO: are broadcast energies returned correctly?
+# TODO: periodic boundary conditions including triclinic boxes handled correctly
 
 @pytest.mark.parametrize("thermostat", multiopenmm.Barostat)
 def test_canonical_ensemble_init_thermostat_type(thermostat):

@@ -303,26 +303,33 @@ class Client:
         state_results = []
 
         if vectors_out or positions_out or velocities_out or energies_out or broadcast_out:
+            # If there is only one instance encompassing all particles, there is
+            # no need to perform special broadcasting logic.  Otherwise,
+            # particle positions will need to be broadcasted across instances to
+            # evaluate the energies of each instance in turn.
+            broadcast_flag = broadcast_out and not (self.__particle_offsets.size == 2
+                and not self.__particle_offsets[0] and self.__particle_offsets[1] == self.__particle_masses.size)
+
             # Determine whether or not the first call to getState() should
             # enforce periodic boundary conditions.  Note that if we have the
-            # broadcast_out flag set, we want to not enforce periodic boundary
+            # broadcast_flag flag set, we want to not enforce periodic boundary
             # conditions because we will want to evaluate and restore using
             # unwrapped coordinates for broadcasted potential energy evaluation.
-            enforce_periodic_flag = bool(positions_out and not broadcast_out and numpy.all(enforce_periodic))
+            enforce_periodic_flag = bool(positions_out and not broadcast_flag and numpy.all(enforce_periodic))
 
             state = self.__context.getState(
-                getPositions=positions_out or broadcast_out,
+                getPositions=positions_out or broadcast_flag,
                 getVelocities=velocities_out,
-                getEnergy=energies_out,
+                getEnergy=energies_out or (broadcast_out and not broadcast_flag),
                 enforcePeriodicBox=enforce_periodic_flag,
             )
 
         if vectors_out:
             state_results.append(support.strip_units(state.getPeriodicBoxVectors(asNumpy=True)))
 
-        if positions_out or broadcast_out:
+        if positions_out or broadcast_flag:
             # The raw_positions array will never be modified and contains
-            # unwrapped coordinates unless broadcast_out is False and all
+            # unwrapped coordinates unless broadcast_flag is False and all
             # instances are requesting wrapped coordinates.
             raw_positions = support.strip_units(state.getPositions(asNumpy=True))
 
@@ -334,7 +341,7 @@ class Client:
 
             # Determine whether or not an extra call to getState() needs to be
             # made to enforce periodic boundary conditions (the case if
-            # broadcast_out is set and some or all instances are requesting
+            # broadcast_flag is set and some or all instances are requesting
             # wrapped coordinates, or otherwise, some instances are requesting
             # wrapped coordinates and others are not: in either case,
             # enforce_periodic_flag will have been set to False, so we know for
@@ -373,29 +380,37 @@ class Client:
 
         if broadcast_out:
             broadcast_energies = []
-            
-            # For each instance, copy positions to all other instances and
-            # evaluate the system energy.  If instances have different sizes,
-            # this will either select only the first positions from the source
-            # instance, or leave extra positions at the destination instance.
-            # Normally, this will be done with identical instances, so no such
-            # mismatches will occur (as the energies returned in the case of
-            # such mismatches will usually correspond to non-physical
-            # configurations); note in this case that if the unscaled energy of
-            # an instance is desired, it is necessary to divide the returned
-            # energies by the sum of the scale factors for the instances.
-            for evaluate_instance_index, (evaluate_start_index, evaluate_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
-                evaluate_positions = numpy.array(raw_positions)
-                for source_instance_index, (source_start_index, source_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
-                    if source_instance_index == evaluate_instance_index:
-                        continue
-                    length = min(evaluate_end_index - evaluate_start_index, source_end_index - source_start_index)
-                    evaluate_positions[evaluate_start_index:evaluate_start_index + length] = evaluate_positions[source_start_index:source_start_index + length]
-                self.__context.setPositions(evaluate_positions)
-                broadcast_energies.append(support.strip_units(self.__context.getState(getEnergy=True).getPotentialEnergy()))
 
-            # Restore the original positions.
-            self.__context.setPositions(raw_positions)
+            if broadcast_flag:
+                # For each instance, copy positions to all other instances and
+                # evaluate the system energy.  If instances have different
+                # sizes, this will either select only the first positions from
+                # the source instance, or leave extra positions at the
+                # destination instance.  Normally, this will be done with
+                # identical instances, so no such mismatches will occur (as the
+                # energies returned in the case of such mismatches will usually
+                # correspond to non-physical configurations); note in this case
+                # that if the unscaled energy of an instance is desired, it is
+                # necessary to divide the returned energies by the sum of the
+                # scale factors for the instances.
+                for evaluate_instance_index, (evaluate_start_index, evaluate_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
+                    evaluate_positions = numpy.array(raw_positions)
+                    for source_instance_index, (source_start_index, source_end_index) in enumerate(zip(self.__particle_offsets[:-1], self.__particle_offsets[1:])):
+                        if source_instance_index == evaluate_instance_index:
+                            continue
+                        length = min(evaluate_end_index - evaluate_start_index, source_end_index - source_start_index)
+                        evaluate_positions[evaluate_start_index:evaluate_start_index + length] = evaluate_positions[source_start_index:source_start_index + length]
+                    self.__context.setPositions(evaluate_positions)
+                    broadcast_energies.append(support.strip_units(self.__context.getState(getEnergy=True).getPotentialEnergy()))
+
+                # Restore the original positions.
+                self.__context.setPositions(raw_positions)
+
+            else:
+                # If broadcast_out is set but broadcast_flag is not, it is
+                # because there is a single instance and the system energy can
+                # just be used directly.
+                broadcast_energies.append(support.strip_units(state.getPotentialEnergy()))
 
             state_results.append(numpy.array(broadcast_energies))
 

@@ -11,5 +11,4 @@ vary over the course of a simulation.
 
 .. toctree::
    api
-   cli
    guide

@@ -157,7 +157,7 @@ def delete_results(integration_results):
         path_table, _, _, _, _, _, _ = integration_result._get_data()
         paths.update(path_table)
 
-    for path in sorted(paths):
+    for path in sorted(paths, key=support.sort_key_str_or_none):
         if path is not None:
             try:
                 os.remove(path)
@@ -217,6 +217,8 @@ class DCDExporter(Exporter):
     Notes
     -----
     MDTraj must be installed to create an instance of this exporter.
+    :py:meth:`close` should be called after use; alternatively, the exporter can
+    be used as a context manager.
     """
 
     A_PER_NM = 10
@@ -279,10 +281,6 @@ class DCDExporter(Exporter):
         return self.__write_vectors
 
     def export(self, get_frames):
-        """
-        Exports information from trajectory frames.
-        """
-
         for frame in get_frames(self.__index):
             vectors = frame.get("vectors")
             positions = frame.get("positions")
@@ -314,6 +312,11 @@ class TextVelocityExporter(Exporter):
         The path to which to write.
     index : int
         The index of the instance for which to export information.
+
+    Notes
+    -----
+    :py:meth:`close` should be called after use; alternatively, the exporter can
+    be used as a context manager.
     """
 
     __slots__ = ("__path", "__index", "__file")
@@ -359,10 +362,6 @@ class TextVelocityExporter(Exporter):
         return self.__index
     
     def export(self, get_frames):
-        """
-        Exports information from trajectory frames.
-        """
-
         for frame in get_frames(self.__index):
             velocities = frame.get("velocities")
 
@@ -387,6 +386,11 @@ class TextEnergyExporter(Exporter):
         Whether or not to write potential energy values.
     write_kinetic : bool, optional
         Whether or not to write kinetic energy values.
+
+    Notes
+    -----
+    :py:meth:`close` should be called after use; alternatively, the exporter can
+    be used as a context manager.
     """
 
     __slots__ = ("__path", "__index", "__write_potential", "__write_kinetic",
@@ -455,10 +459,6 @@ class TextEnergyExporter(Exporter):
         return self.__write_kinetic
 
     def export(self, get_frames):
-        """
-        Exports information from trajectory frames.
-        """
-
         for frame in get_frames(self.__index):
             potential_energy = frame.get("potential_energy")
             kinetic_energy = frame.get("kinetic_energy")

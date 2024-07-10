@@ -21,9 +21,13 @@
 # SOFTWARE.
 
 import abc
+import concurrent.futures
+import enum
 import itertools
+import threading
 
 from . import simulation
+from . import socklib
 from . import support
 
 class Manager(abc.ABC):
@@ -145,6 +149,118 @@ class SynchronousManager(Manager):
         else:
             raise data
 
+class WorkerPoolKind(enum.Enum):
+    """
+    Specifies a kind of pool of workers to use for a
+    :py:class:`multiopenmm.WorkerPoolManager`.
+    """
+
+    #: Thread pool (:py:class:`concurrent.futures.ThreadPoolExecutor`).
+    THREAD = enum.auto()
+
+    #: Process pool (:py:class:`concurrent.futures.ProcessPoolExecutor`).
+    PROCESS = enum.auto()
+
+class WorkerPoolManager(Manager):
+    """
+    A task manager supporting execution of multiple tasks simultaneously.  Tasks
+    are distributed to worker threads or processes automatically and results are
+    made available as they are completed.  Thread or process workers are created
+    as needed by the manager; externally created processes cannot be registered
+    with the manager, and processes cannot be dynamically added or removed while
+    work is being done.
+
+    Parameters
+    ----------
+    kind : multiopenmm.WorkerPoolKind
+        The kind of pool of workers to create.
+    worker_count : int, optional
+        The value for the ``max_workers`` parameter of the
+        :py:class:`concurrent.futures.Executor` created for the manager.
+
+    Notes
+    -----
+    :py:meth:`close` should be called after use; alternatively, the exporter can
+    be used as a context manager.
+    """
+
+    __slots__ = ("__executor", "__futures")
+
+    def __init__(self, kind, worker_count=None, *args, **kwargs):
+        if not isinstance(kind, WorkerPoolKind):
+            raise TypeError("kind must be a WorkerPoolKind")
+
+        super().__init__(*args, **kwargs)
+
+        if kind is WorkerPoolKind.THREAD:
+            self.__executor = concurrent.futures.ThreadPoolExecutor(worker_count)
+        elif kind is WorkerPoolKind.PROCESS:
+            self.__executor = concurrent.futures.ProcessPoolExecutor(worker_count)
+        else:
+            raise RuntimeError("unrecognized WorkerPoolKind")
+
+        self.__futures = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self):
+        """
+        Shuts down the underlying thread pool.
+        """
+        
+        self.__executor.shutdown()
+
+    def _distribute(self, *requests):
+        responses = []
+
+        for request in requests:
+            request_with_platform_data = support.Arguments(*request.args, **request.kwargs, platform_data=self.platform_data)
+            future = self.__executor.submit(WorkerPoolManager._execute, request_with_platform_data)
+
+            token = self._get_token()
+            self.__futures[token] = future
+            responses.append(Response(self, token))
+
+        return tuple(responses)
+    
+    def _get_response(self, token):
+        try:
+            future = self.__futures.pop(token)
+        except KeyError:
+            raise ValueError("response already evaluated")
+        
+        success, data = future.result()
+
+        if success:
+            return data
+        else:
+            raise data
+
+    @staticmethod
+    def _execute(request):
+        if not hasattr(_worker_pool_manager_local, "client"):
+            _worker_pool_manager_local.client = simulation.Client()
+
+        try:
+            data = request.apply_to(_worker_pool_manager_local.client.execute)
+            success = True
+        except Exception as exception:
+            data = exception
+            success = False
+
+        return success, data
+
+# Global state for WorkerPoolManager pool parallelism.  For thread-based
+# parallelism, this will be separate for each worker thread created by any
+# WorkerPoolManager instance and will never be used by any main process or
+# thread using a manager.  For process-based parallelism, this will obviously be
+# separate for each worker process.
+_worker_pool_manager_local = threading.local()
+
 class SocketServerManager(Manager):
     """
     A task manager supporting execution of multiple tasks through a socket
@@ -153,8 +269,63 @@ class SocketServerManager(Manager):
     server is running and other clients are processing tasks; new tasks will be
     distributed to the new clients as well as the existing ones.  Clients may be
     disconnected while they are idle or busy; interrupted tasks will be
-    redispatched to other clients.  Results are made available as they are
-    returned from clients.
+    redispatched to other clients.  Results are made available after work is
+    complete.
+
+    Parameters
+    ----------
+    server : multiopenmm.socklib.QueueServer
+        A socket server created by :py:func:`multiopenmm.socket_serve`.
     """
 
-    raise NotImplementedError
+    __slots__ = ("__server", "__tasks")
+
+    def __init__(self, server, *args, **kwargs):
+        if not isinstance(server, socklib.QueueServer):
+            raise TypeError("server must be a QueueServer")
+
+        super().__init__(*args, **kwargs)
+
+        self.__server = server
+        self.__tasks = {}
+
+    def _distribute(self, *requests):
+        task_arguments = [(SocketServerManager._execute, support.Arguments(*request.args, **request.kwargs, platform_data=self.platform_data)) for request in requests]
+        tasks = self.__server.distribute(*task_arguments)
+        
+        responses = []
+
+        for task in tasks:
+            token = self._get_token()
+            self.__tasks[token] = task
+            responses.append(Response(self, token))
+
+        return tuple(responses)
+    
+    def _get_response(self, token):
+        try:
+            task = self.__tasks.pop(token)
+        except KeyError:
+            raise ValueError("response already evaluated")
+        
+        success, data = task.get_result()
+
+        if success:
+            return data
+        else:
+            raise data
+
+    @staticmethod
+    def _execute(state, request):
+        if "client" not in state:
+            state["client"] = simulation.Client()
+        client = state["client"]
+
+        try:
+            data = request.apply_to(client.execute)
+            success = True
+        except Exception as exception:
+            data = exception
+            success = False
+
+        return success, data

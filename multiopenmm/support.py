@@ -120,6 +120,12 @@ def strip_units(quantity):
 
     return quantity.value_in_unit_system(openmm.unit.md_unit_system)
 
+#: float: Boltzmann's constant.
+K_B = strip_units(openmm.unit.BOLTZMANN_CONSTANT_kB * openmm.unit.AVOGADRO_CONSTANT_NA)
+
+def sort_key_str_or_none(value):
+    return (False, "") if value is None else (True, value)
+
 def get_seed(rng):
     # Returns a positive random seed that will not overflow a 32-bit
     # integer.  This explicitly excludes zero, as this is sometimes interpreted

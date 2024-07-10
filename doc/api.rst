@@ -74,6 +74,9 @@ Manual trajectory exporting
 Replica exchange run management
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. autoclass:: multiopenmm.SwapInformation
+   :members:
+
 .. autoclass:: multiopenmm.parallel.ExchangePairGenerator
    :members:
 
@@ -100,6 +103,20 @@ Task management
 .. autoclass:: multiopenmm.SynchronousManager
    :members:
    :show-inheritance:
+
+.. autoclass:: multiopenmm.WorkerPoolManager
+   :members:
+   :show-inheritance:
+
+.. autoclass:: multiopenmm.WorkerPoolKind()
+   :members:
+   :member-order: bysource
+
+.. autoclass:: multiopenmm.SocketServerManager
+   :members:
+   :show-inheritance:
+
+.. autofunction:: multiopenmm.socket_serve
 
 .. autoclass:: multiopenmm.PlatformData
    :members:
