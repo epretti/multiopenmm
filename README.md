@@ -11,14 +11,15 @@ systems, within a single OpenMM context.
 incompletely documented, or incompletely tested.  This file will be updated as
 development progresses.** 🚧 🚧 
 
-Development and license information
------------------------------------
+Acknowledgment and license information
+--------------------------------------
 
 This software is developed by Evan Pretti in the [Shell research
 group](https://theshelllab.org/) in the [Department of Chemical
 Engineering](https://www.chemengr.ucsb.edu/) at the [University of California,
-Santa Barbara](https://www.ucsb.edu/).  Evan Pretti acknowledges support from
-the Molecular Sciences Software Institute.  The Molecular Sciences Software
+Santa Barbara](https://www.ucsb.edu/).  Evan Pretti gratefully acknowledges
+support from the Molecular Sciences Software Institute (MolSSI) as well as
+helpful discussions with Levi Naden at MolSSI.  The Molecular Sciences Software
 Institute is supported by the National Science Foundation under Grant
 CHE-2136142.
 
