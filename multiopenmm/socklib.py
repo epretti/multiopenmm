@@ -24,27 +24,34 @@
 A simple client-server task library.
 """
 
+import atexit
 import contextlib
 import enum
 import functools
+import hashlib
+import hmac
 import itertools
 import os
 import pickle
+import secrets
 import select
 import socket
 import struct
 import sys
 import tempfile
-import traceback
 import time
+import traceback
 
+from . import support
+
+_NAME = "socklib"
 _DEFAULT_CONNECT_INTERVAL = 1
 _DEFAULT_RUN_INTERVAL = None
 
 DEBUG = False
 
 def _log(*args, **kwargs):
-    print("socklib:", *args, **kwargs, file=sys.stderr)
+    print(f"{_NAME}:", *args, **kwargs, file=sys.stderr)
 
 def _debug(*args, **kwargs):
     if DEBUG:
@@ -72,9 +79,19 @@ class Sock(socket.socket):
     A socket allowing buffers of arbitrary length as well as complete Python
     objects to be sent and received directly.  See `socket.socket` for more
     information.
+
+    Parameters
+    ----------
+    token : bytes
+        A token used to verify message data.
+    out_of_band : bool
+        Whether or not to spool message data to temporary files rather than send
+        it over the socket directly.  This can be useful if messages are very
+        large and filesystem performance exceeds socket performance for a given
+        system.
     """
 
-    __slots__ = ("__buf",)
+    __slots__ = ("__buf", "__token", "__out_of_band", "__out_of_band_path", "__out_of_band_clean")
 
     # The format string for message headers.
     __HDR_FMT = "<QQ"
@@ -85,19 +102,47 @@ class Sock(socket.socket):
     # The maximum length of a block to receive.
     __RECV_LEN = 4096
 
-    def __init__(self, *args, **kwargs):
+    # The hash algorithm to use with HMAC to verify message data.
+    __HMAC_DIGEST = "sha3_512"
+    # The length of the HMAC output.
+    __HMAC_LEN = hashlib.new(__HMAC_DIGEST).digest_size
+
+    def __init__(self, *args, token, out_of_band, **kwargs):
         super().__init__(*args, **kwargs)
 
         # Create a buffer to hold incoming data.
         self.__buf = bytearray()
+        self.__token = bytes(token)
+        self.__out_of_band = bool(out_of_band)
+        self.__out_of_band_clean = []
+
+        if self.__out_of_band:
+            with tempfile.NamedTemporaryFile(prefix="multiopenmm_socklib_", suffix=".mmmsock", dir=support.get_scratch_directory(), delete=False) as temp_file:
+                pass
+            self.__out_of_band_path = temp_file.name
+            _debug(f"opened out-of-band communication file {self.__out_of_band_path}")
+
+    def close(self):
+        super().close()
+        if self.__out_of_band:
+            if self.__out_of_band_clean is not None:
+                atexit.register(type(self)._remove_out_of_band, self.__out_of_band_path)
+                for path in self.__out_of_band_clean:
+                    atexit.register(type(self)._remove_out_of_band, path)
+
+    @staticmethod
+    def _remove_out_of_band(path):
+        _debug(f"removing out-of-band communication file {path}")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
 
     def __repr__(self):
-        sockname = peername = ("?", "?")
+        sockname_host = sockname_port = peername_host = peername_port = "?"
         with contextlib.suppress(OSError):
-            sockname = self.getsockname()
+            sockname_host, sockname_port = self.getsockname()
         with contextlib.suppress(OSError):
-            peername = self.getpeername()
-        return "[{}:{} -> {}:{}]".format(*sockname, *peername)
+            peername_host, peername_port = self.getpeername()
+        return f"[{sockname_host}:{sockname_port} -> {peername_host}:{peername_port}]"
 
     def accept(self):
         """
@@ -116,7 +161,10 @@ class Sock(socket.socket):
         # except that it creates the same type of client socket as the server
         # socket instead of always creating an instance of socket.socket.
         fd, addr = self._accept()
-        sock = type(self)(self.family, self.type, self.proto, fileno=fd)
+        sock = type(self)(self.family, self.type, self.proto, fileno=fd, token=self.__token, out_of_band=self.__out_of_band)
+        if self.__out_of_band:
+            self.__out_of_band_clean.append(sock.__out_of_band_path)
+            sock.__out_of_band_clean = None
         if socket.getdefaulttimeout() is None and self.gettimeout():
             sock.setblocking(True)
         return sock, addr
@@ -131,7 +179,11 @@ class Sock(socket.socket):
             The bytes to send.
         """
         
-        self.sendall(struct.pack(self.__HDR_FMT, self.__HDR_MAGIC, len(msg)) + msg)
+        if self.__out_of_band:
+            with open(self.__out_of_band_path, "wb") as msg_file:
+                msg_file.write(msg)
+            msg = self.__out_of_band_path.encode()
+        self.sendall(struct.pack(self.__HDR_FMT, self.__HDR_MAGIC, len(msg)) + hmac.digest(self.__token, msg, self.__HMAC_DIGEST) + msg)
 
     def send_obj(self, obj):
         """
@@ -175,21 +227,29 @@ class Sock(socket.socket):
             Buffers received.
         """
 
-        while len(self.__buf) >= self.__HDR_LEN:
+        while len(self.__buf) >= self.__HDR_LEN + self.__HMAC_LEN:
             # There is at least a message header in the buffer; read the length
             # of the message and see if it is also fully present in the buffer.
             magic, msg_len = struct.unpack(self.__HDR_FMT, self.__buf[:self.__HDR_LEN])
             if magic != self.__HDR_MAGIC:
                 raise SockError("invalid message header")
-            msg_end = self.__HDR_LEN + msg_len
+            digest_recv = self.__buf[self.__HDR_LEN:self.__HDR_LEN + self.__HMAC_LEN]
+            msg_end = self.__HDR_LEN + self.__HMAC_LEN + msg_len
             if len(self.__buf) < msg_end:
                 break
 
-            # If a message is present, yield it, and then remove it and its
-            # length from the buffer to place the next message (if one is
-            # present) at the beginning.
-            msg = self.__buf[self.__HDR_LEN:msg_end]
+            # If a message is present, verify it, yield it, and then remove it
+            # and its length from the buffer to place the next message (if one
+            # is present) at the beginning.
+            msg = self.__buf[self.__HDR_LEN + self.__HMAC_LEN:msg_end]
+            if not hmac.compare_digest(hmac.digest(self.__token, msg, self.__HMAC_DIGEST), digest_recv):
+                raise SockError("invalid message digest")
             del self.__buf[:msg_end]
+
+            if self.__out_of_band:
+                msg_path = msg.decode()
+                with open(msg_path, "rb") as msg_file:
+                    msg = msg_file.read()
             yield msg
 
     def recv_objs(self):
@@ -209,15 +269,15 @@ class Sock(socket.socket):
 class _SockWorker:
     __slots__ = ("_sock", "_host", "_port")
 
-    def __init__(self, host, port):
-        self._sock = Sock()
+    def __init__(self, host, port, token, out_of_band):
+        self._sock = Sock(token=token, out_of_band=out_of_band)
         self._connect(host, port)
         self._host, self._port = self._sock.getsockname()
 
         _log("created", self)
 
     def __repr__(self):
-        return "<{}: {}>".format(type(self).__name__, self._sock)
+        return f"<{type(self).__name__}: {self._sock}>"
 
     def __enter__(self):
         return self
@@ -240,7 +300,7 @@ class _SockWorker:
         if timeout is None:
             _debug("listening loop started with no timeout")
         else:
-            _debug("listening loop started with interval {:.3f} s".format(timeout))
+            _debug(f"listening loop started with interval {timeout:.3f} s")
         index = -1
         for index in itertools.count() if count is None else range(count):
             sock_list = (self._sock, *self._get_socks())
@@ -274,17 +334,26 @@ class Server(_SockWorker):
         The hostname.  If none is provided, `socket.gethostname()` will be used.
     port : int, optional
         The port.  If none is provided, an unused port will be used.
+    out_of_band : bool, optional
+        Whether or not to spool data to temporary files rather than send it over
+        sockets directly.
     """
 
-    __slots__ = ()
+    __slots__ = ("__token", "__out_of_band")
 
-    def __init__(self, host=None, port=None):
+    # The length in bytes of tokens used to verify message data.
+    __TOKEN_LEN = 64
+
+    def __init__(self, host=None, port=None, out_of_band=False):
         if host is None:
             host = socket.gethostname()
         if port is None:
             port = 0
 
-        super().__init__(host, port)
+        self.__token = secrets.token_bytes(self.__TOKEN_LEN)
+        self.__out_of_band = bool(out_of_band)
+
+        super().__init__(host, port, self.__token, self.__out_of_band)
 
     def _connect(self, host, port):
         self._sock.bind((host, port))
@@ -306,7 +375,7 @@ class Server(_SockWorker):
         """
         
         with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as temp_file:
-            pickle.dump((self._host, self._port), temp_file)
+            pickle.dump((self._host, self._port, self.__token, self.__out_of_band), temp_file)
         os.replace(temp_file.name, path)
 
     def _run(self, x_list, r_list):
@@ -378,12 +447,17 @@ class Client(_SockWorker):
         The hostname of the server.
     port : int
         The port of the server.
+    token : bytes
+        A token used to verify message data.
+    out_of_band : bool, optional
+        Whether or not to spool data to temporary files rather than send it over
+        sockets directly.
     """
 
     __slots__ = ()
 
-    def __init__(self, host, port):
-        super().__init__(host, port)
+    def __init__(self, host, port, token, out_of_band):
+        super().__init__(host, port, token, out_of_band)
 
     def _connect(self, host, port):
         self._sock.connect((host, port))
@@ -456,7 +530,7 @@ class Task:
         self._seq = seq
 
     def __repr__(self):
-        return "<{}: {}>".format(type(self).__name__, self._seq)
+        return f"<{type(self).__name__}: {self._seq}>"
 
     def remove(self):
         self._server.remove_task(self)
@@ -511,6 +585,7 @@ class QueueServer(Server):
     def __exit__(self, exc_type, exc_val, traceback):
         for sock in self._get_socks():
             self.__sock_exit(sock)
+        super().__exit__(exc_type, exc_val, traceback)
 
     def run(self, *args, **kwargs):
         if self._continue():
@@ -869,7 +944,7 @@ class CallClient(QueueClient):
         return func(state, *args, **kwargs)
 
 @contextlib.contextmanager
-def make(path="socklib.conn", server=QueueServer, client=CallClient, host=None, port=None, keep=True, interval=_DEFAULT_CONNECT_INTERVAL):
+def make(path=f"{_NAME}.conn", server=QueueServer, client=CallClient, host=None, port=None, out_of_band=False, keep=True, interval=_DEFAULT_CONNECT_INTERVAL):
     """
     Creates a socket server with connection information written to a given path,
     or creates a socket client using the information if the connection file
@@ -885,6 +960,7 @@ def make(path="socklib.conn", server=QueueServer, client=CallClient, host=None, 
         The client subclass to instantiate if needed.
     host : str, optional
     port : int, optional
+    out_of_band : bool, optional
         Information used to create a socket server if one needs to be created.
         See `Server`.
     keep : bool, optional
@@ -905,18 +981,20 @@ def make(path="socklib.conn", server=QueueServer, client=CallClient, host=None, 
     except FileExistsError:
         # The connection file already exists; create a client.
         try:
-            yield client.from_conn(path, interval)
+            with client.from_conn(path, interval) as created_client:
+                yield created_client
         except ConnectionRefusedError:
             raise SockError("connection file present but server inaccessible")
     else:
         # The connection file does not exist; create a server.
         try:
-            with server(host, port) as server_inst:
+            with server(host, port, out_of_band) as server_inst:
                 server_inst.write_conn(path)
                 yield server_inst
         finally:
             if not keep:
-                os.remove(path)
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(path)
 
 def serve(*make_args, client_timeout=_DEFAULT_RUN_INTERVAL, client_count=None, **make_kwargs):
     """
