@@ -324,6 +324,9 @@ class Client:
                 enforcePeriodicBox=enforce_periodic_flag,
             )
 
+        else:
+            broadcast_flag = False
+
         if vectors_out:
             state_results.append(support.strip_units(state.getPeriodicBoxVectors(asNumpy=True)))
 

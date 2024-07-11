@@ -1337,21 +1337,23 @@ class Simulation:
             # get there.
             integrate_count = exchange_index - step_index
             result, broadcasted = self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, True, True, indices)
-            if integrate_count:
-                results.append(result)
+            results.append(result)
             step_index += integrate_count
 
             swap_information_data = []
 
-            for instance_index_1, instance_index_2 in pair_generator.generate(self.__rng, iteration_index, indices.size):
+            for instance_index_index_1, instance_index_index_2 in pair_generator.generate(self.__rng, iteration_index, indices.size):
+                instance_index_1 = indices[instance_index_index_1]
+                instance_index_2 = indices[instance_index_index_2]
+
                 temperature_1 = self.__property_values["temperature"][instance_index_1]
                 temperature_2 = self.__property_values["temperature"][instance_index_2]
 
                 swap_probability = acceptance_criterion.probability(use_pressure,
                     1 / (support.K_B * temperature_1),
                     1 / (support.K_B * temperature_2),
-                    broadcasted[instance_index_1],
-                    broadcasted[instance_index_2],
+                    broadcasted[instance_index_index_1],
+                    broadcasted[instance_index_index_2],
                     self.__property_values["pressure"][instance_index_1] if use_pressure else 0,
                     self.__property_values["pressure"][instance_index_2] if use_pressure else 0,
                     numpy.abs(numpy.linalg.det(self.__vectors[instance_index_1])),
@@ -1373,7 +1375,7 @@ class Simulation:
 
                 swap_information_data.append((instance_index_1, instance_index_2, swap_accepted, swap_probability))
 
-            swap_information.append(SwapInformation(len(swap_information_data), *zip(*swap_information_data)))
+            swap_information.append(SwapInformation(len(swap_information_data), *[[data[field_index] for data in swap_information_data] for field_index in range(4)]))
 
             iteration_index += 1
 
@@ -1629,7 +1631,7 @@ class Simulation:
                         runtime_data.append((
                             simulation.RuntimeUpdateObject.CONTEXT,
                             "setParameter",
-                            support.Arguments(openmm.MonteCarloBarostat.Temperature(), temperature),
+                            support.Arguments(openmm.MonteCarloBarostat.Temperature(), run_temperature),
                         ))
                         forces.append(simulation.ObjectData(
                             openmm.MonteCarloBarostat,
@@ -2054,8 +2056,9 @@ class RandomAdjacentExchangePairGenerator(ExchangePairGenerator):
         should be attempted.
         """
 
-        for instance_index in rng.choice(instance_count - 1, size=self.__swap_count, replace=self.__with_replacement):
-            yield (instance_index, instance_index + 1)
+        if self.__swap_count:
+            for instance_index in rng.choice(instance_count - 1, size=self.__swap_count, replace=self.__with_replacement):
+                yield (instance_index, instance_index + 1)
 
 class AcceptanceCriterion(abc.ABC):
     """

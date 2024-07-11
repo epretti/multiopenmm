@@ -44,14 +44,15 @@ import traceback
 
 from . import support
 
-_NAME = "socklib"
 _DEFAULT_CONNECT_INTERVAL = 1
 _DEFAULT_RUN_INTERVAL = None
 
+LOG = False
 DEBUG = False
 
 def _log(*args, **kwargs):
-    print(f"{_NAME}:", *args, **kwargs, file=sys.stderr)
+    if LOG:
+        print(f"{__name__}:", *args, **kwargs, file=sys.stderr)
 
 def _debug(*args, **kwargs):
     if DEBUG:
@@ -944,7 +945,7 @@ class CallClient(QueueClient):
         return func(state, *args, **kwargs)
 
 @contextlib.contextmanager
-def make(path=f"{_NAME}.conn", server=QueueServer, client=CallClient, host=None, port=None, out_of_band=False, keep=True, interval=_DEFAULT_CONNECT_INTERVAL):
+def make(path="multiopenmm_socklib.mmmconn", server=QueueServer, client=CallClient, host=None, port=None, out_of_band=False, keep=True, interval=_DEFAULT_CONNECT_INTERVAL):
     """
     Creates a socket server with connection information written to a given path,
     or creates a socket client using the information if the connection file

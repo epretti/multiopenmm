@@ -25,8 +25,11 @@ import io
 import multiopenmm
 import numpy
 import openmm
+import os
 import pytest
 import scipy
+import subprocess
+import sys
 import tempfile
 
 HELP_TEMPLATE_SIZES = (
@@ -93,6 +96,22 @@ HELP_INDICES_SPEC = (
     (5, [2, 2, 2, 2, 2], [2, 2, 2, 2, 2]),
     (5, [2, 2, -3, -3, 2], [2, 2, 2, 2, 2]),
     (5, [1, 2, 2, 2, 3], [1, 2, 2, 2, 3]),
+)
+
+HELP_STEPPINGS = (
+    (0, 2, 1), (0, 3, 1), (0, 3, 2), (0, 3, 100), (0, 19, 1), (0, 19, 2),
+    (0, 19, 3), (0, 99, 1), (0, 99, 3), (0, 100, 1), (0, 100, 2), (0, 101, 3),
+    (0, 101, 19), (0, 101, 99), (0, 137, 1), (0, 137, 2), (0, 137, 100),
+    (1, 3, 1), (1, 19, 1), (1, 19, 2), (1, 19, 3), (1, 19, 100), (1, 99, 1),
+    (1, 99, 2), (1, 100, 1), (1, 100, 3), (1, 101, 2), (1, 101, 19),
+    (1, 137, 1), (1, 137, 3), (1, 137, 99), (2, 19, 1), (2, 19, 2), (2, 19, 3),
+    (2, 99, 1), (2, 99, 100), (2, 100, 1), (2, 100, 2), (2, 101, 3),
+    (2, 101, 19), (2, 137, 1), (2, 137, 2), (3, 19, 1), (3, 19, 2), (3, 19, 3),
+    (3, 99, 1), (3, 99, 2), (3, 99, 3), (3, 100, 1), (3, 100, 100), (3, 101, 2),
+    (3, 101, 3), (3, 101, 19), (3, 137, 1), (19, 99, 1), (19, 99, 2),
+    (19, 100, 1), (19, 100, 3), (19, 101, 2), (19, 101, 19), (19, 101, 99),
+    (19, 137, 1), (19, 137, 3), (99, 101, 99), (99, 137, 1), (100, 2, 1),
+    (100, 137, 1)
 )
 
 HELP_EPSILON = numpy.sqrt(numpy.finfo(numpy.single).eps * numpy.finfo(numpy.double).eps)
@@ -1116,7 +1135,93 @@ def test_simulation_integrate_broadcast_energies_type(broadcast_energies):
 @pytest.mark.parametrize("write_velocities", (False, True))
 @pytest.mark.parametrize("write_energies", (False, True))
 @pytest.mark.parametrize("broadcast_energies", (False, True))
-def test_simulation_integrate_options(stacks, indices, step_count, write_velocities, write_energies, broadcast_energies):
+@pytest.mark.parametrize("npt_ensemble", (False, True))
+def test_simulation_integrate_options(stacks, indices, step_count, write_velocities, write_energies, broadcast_energies, npt_ensemble):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            templates = tuple(helpers_test.help_make_templates((2, 3)))
+            for template in templates:
+                force = openmm.CustomNonbondedForce("0")
+                for index in range(template.getNumParticles()):
+                    force.addParticle(())
+                force.setNonbondedMethod(force.CutoffPeriodic)
+                force.setCutoffDistance(0.1)
+                template.addForce(force)
+            template_indices = (0, 0, 1, 1, 1)
+
+            simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(),
+                multiopenmm.IsothermalIsobaricEnsemble() if npt_ensemble else multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = len(template_indices)
+            simulation.set_template_indices(template_indices)
+            simulation.set_stacks(stacks)
+            simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+            if npt_ensemble:
+                simulation.set_property_values("pressure", numpy.linspace(0.001, 0.005, 5))
+
+            simulation.set_positions(numpy.linspace(0, 3.8, 39).reshape(13, 3))
+            simulation.set_velocities(numpy.linspace(3.9, 7.7, 39).reshape(13, 3))
+
+            vectors_initial = [simulation.get_vectors(instance_index) for instance_index in range(len(template_indices))]
+            positions_initial = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+            velocities_initial = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+            if npt_ensemble and len(set(simulation.get_stacks()[list(indices)])) < len(set(indices)):
+                print(indices, simulation.get_stacks())
+                with pytest.raises(multiopenmm.MultiOpenMMError):
+                    simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=1,
+                        write_velocities=write_velocities, write_energies=write_energies, broadcast_energies=broadcast_energies, indices=list(indices))
+            else:
+                integration_result = simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=1,
+                    write_velocities=write_velocities, write_energies=write_energies, broadcast_energies=broadcast_energies, indices=list(indices))
+                if broadcast_energies:
+                    integration_result, broadcast_result = integration_result
+
+                vectors_final = [simulation.get_vectors(instance_index) for instance_index in range(len(template_indices))]
+                positions_final = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+                velocities_final = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+                for index in range(len(template_indices)):
+                    if index in indices and step_count:
+                        if not npt_ensemble:
+                            helpers_test.help_check_equal(vectors_final[index], vectors_initial[index])
+                        helpers_test.help_check_changed(positions_final[index], positions_initial[index])
+                        helpers_test.help_check_changed(velocities_final[index], velocities_initial[index])
+                    else:
+                        helpers_test.help_check_equal(vectors_final[index], vectors_initial[index])
+                        helpers_test.help_check_equal(positions_final[index], positions_initial[index])
+                        helpers_test.help_check_equal(velocities_final[index], velocities_initial[index])
+
+                class TestExporter(multiopenmm.export.Exporter):
+                    def export(self, get_frames):
+                        self.data = tuple(tuple(get_frames(index)) for index in range(len(template_indices)))
+                exporter = TestExporter()
+                multiopenmm.export_results((integration_result,), (exporter,))
+                data = exporter.data
+
+                for index in range(len(template_indices)):
+                    if index in indices:
+                        assert len(data[index]) == step_count + 1
+                        for frame in data[index]:
+                            assert "vectors" in frame
+                            assert "positions" in frame
+                            assert ("velocities" in frame) == write_velocities
+                            assert ("potential_energy" in frame) == write_energies
+                            assert ("kinetic_energy" in frame) == write_energies
+                    else:
+                        assert data[index] == ()
+
+                if broadcast_energies:
+                    assert broadcast_result.size == len(indices)
+
+    finally:
+        multiopenmm.set_scratch_directory()
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices", ((), (0, 1, 2, 3, 4), (0,), (0, 2), (0, 1, 2), (0, 0, 1, 2, 0)))
+@pytest.mark.parametrize("step_count", (0, 1, 2, 10))
+def test_simulation_integrate_switch_platforms(stacks, indices, step_count):
     try:
         with tempfile.TemporaryDirectory() as temporary_path:
             multiopenmm.set_scratch_directory(temporary_path)
@@ -1124,7 +1229,8 @@ def test_simulation_integrate_options(stacks, indices, step_count, write_velocit
             templates = tuple(helpers_test.help_make_templates((2, 3)))
             template_indices = (0, 0, 1, 1, 1)
 
-            simulation = multiopenmm.Simulation(templates, multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            manager = multiopenmm.SynchronousManager()
+            simulation = multiopenmm.Simulation(templates, manager, multiopenmm.CanonicalEnsemble())
             simulation.instance_count = len(template_indices)
             simulation.set_template_indices(template_indices)
             simulation.set_stacks(stacks)
@@ -1136,10 +1242,13 @@ def test_simulation_integrate_options(stacks, indices, step_count, write_velocit
             positions_initial = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
             velocities_initial = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
 
-            integration_result = simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=1,
-                write_velocities=write_velocities, write_energies=write_energies, broadcast_energies=broadcast_energies, indices=list(indices))
-            if broadcast_energies:
-                integration_result, broadcast_result = integration_result
+            integration_results = [] 
+            for integrate_index in range(5):
+                manager.platform_data = multiopenmm.PlatformData(("Reference", "CPU", "Reference", "CPU", "Reference")[integrate_index])
+                integration_result, broadcast_result = simulation.integrate(step_count, write_start=0, write_stop=step_count + 1, write_step=1,
+                    write_velocities=True, write_energies=True, broadcast_energies=True, indices=list(indices))
+                integration_results.append(integration_result)
+                assert broadcast_result.size == len(indices)
 
             positions_final = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
             velocities_final = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
@@ -1153,26 +1262,26 @@ def test_simulation_integrate_options(stacks, indices, step_count, write_velocit
                     helpers_test.help_check_equal(velocities_final[index], velocities_initial[index])
 
             class TestExporter(multiopenmm.export.Exporter):
+                def __init__(self):
+                    self.data = [[] for index in range(len(template_indices))]
                 def export(self, get_frames):
-                    self.data = tuple(tuple(get_frames(index)) for index in range(len(template_indices)))
+                    for index in range(len(template_indices)):
+                        self.data[index].extend(get_frames(index))
             exporter = TestExporter()
-            multiopenmm.export_results((integration_result,), (exporter,))
+            multiopenmm.export_results(integration_results, (exporter,))
             data = exporter.data
 
             for index in range(len(template_indices)):
                 if index in indices:
-                    assert len(data[index]) == step_count + 1
+                    assert len(data[index]) == (step_count + 1) * 5
                     for frame in data[index]:
                         assert "vectors" in frame
                         assert "positions" in frame
-                        assert ("velocities" in frame) == write_velocities
-                        assert ("potential_energy" in frame) == write_energies
-                        assert ("kinetic_energy" in frame) == write_energies
+                        assert "velocities" in frame
+                        assert "potential_energy" in frame
+                        assert "kinetic_energy" in frame
                 else:
-                    assert data[index] == ()
-
-            if broadcast_energies:
-                assert broadcast_result.size == len(indices)
+                    assert not data[index]
 
     finally:
         multiopenmm.set_scratch_directory()
@@ -1261,20 +1370,300 @@ def test_simulation_integrate_beginning_end(step_count):
     finally:
         multiopenmm.set_scratch_directory()
 
-@pytest.mark.xfail
-def test_simulation_replica_exchange():
-    # TODO: Test Simulation.replica_exchange().
-    # TODO: test replica exchange options: *ExchangePairGenerator, *AcceptanceCriterion
-    raise NotImplementedError
+@pytest.mark.parametrize("pair_generator", (object(), None, multiopenmm.MetropolisAcceptanceCriterion()))
+def test_simulation_replica_exchange_pair_generator_type(pair_generator):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(pair_generator, multiopenmm.MetropolisAcceptanceCriterion(), 1)
 
-# TODO: can we change platforms in the midst of a simulation?
-# TODO: test exporters: export_results, delete_results, *Exporter
-# TODO: test ensembles: Canonical, IsothermalIsobaric, etc., in simulation!
-# TODO: stochastic tests with checkensemble or something like this
-# TODO: test managers: ThreadPool, ProcessPool, SocketServer
-# TODO: basic tutorial in documentation and documentation cleanup
-# TODO: are broadcast energies returned correctly?
-# TODO: periodic boundary conditions including triclinic boxes handled correctly
+@pytest.mark.parametrize("acceptance_criterion", (object(), None, multiopenmm.RandomAdjacentExchangePairGenerator(0)))
+def test_simulation_replica_exchange_acceptance_criterion_type(acceptance_criterion):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), acceptance_criterion, 1)
+
+@pytest.mark.parametrize("step_count", (object(), None, 1.0))
+def test_simulation_replica_exchange_step_count_type(step_count):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), step_count)
+
+@pytest.mark.parametrize("step_count", (-10, -1))
+def test_simulation_replica_exchange_step_count_value(step_count):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), step_count)
+
+@pytest.mark.parametrize("write_start", (object(), 1.0))
+def test_simulation_replica_exchange_write_start_type(write_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_start=write_start)
+
+@pytest.mark.parametrize("write_start", (-10, -1))
+def test_simulation_replica_exchange_write_start_value(write_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_start=write_start)
+
+@pytest.mark.parametrize("write_stop", (object(), 1.0))
+def test_simulation_replica_exchange_write_stop_type(write_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_stop=write_stop)
+
+@pytest.mark.parametrize("write_stop", (-10, -1))
+def test_simulation_replica_exchange_write_stop_value(write_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_stop=write_stop)
+
+@pytest.mark.parametrize("write_step", (object(), 1.0))
+def test_simulation_replica_exchange_write_step_type(write_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_step=write_step)
+
+@pytest.mark.parametrize("write_step", (-10, -1, 0))
+def test_simulation_replica_exchange_write_step_value(write_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_step=write_step)
+
+@pytest.mark.parametrize("exchange_start", (object(), 1.0))
+def test_simulation_replica_exchange_exchange_start_type(exchange_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_start=exchange_start)
+
+@pytest.mark.parametrize("exchange_start", (-10, -1))
+def test_simulation_replica_exchange_exchange_start_value(exchange_start):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_start=exchange_start)
+
+@pytest.mark.parametrize("exchange_stop", (object(), 1.0))
+def test_simulation_replica_exchange_exchange_stop_type(exchange_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_stop=exchange_stop)
+
+@pytest.mark.parametrize("exchange_stop", (-10, -1))
+def test_simulation_replica_exchange_exchange_stop_value(exchange_stop):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_stop=exchange_stop)
+
+@pytest.mark.parametrize("exchange_step", (object(), 1.0))
+def test_simulation_replica_exchange_exchange_step_type(exchange_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_step=exchange_step)
+
+@pytest.mark.parametrize("exchange_step", (-10, -1, 0))
+def test_simulation_replica_exchange_exchange_step_value(exchange_step):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(ValueError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, exchange_step=exchange_step)
+
+@pytest.mark.parametrize("write_velocities", (object(), None, 0, 1, 1.0))
+def test_simulation_replica_exchange_write_velocities_type(write_velocities):
+    simulation = multiopenmm.Simulation((), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+    with pytest.raises(TypeError):
+        simulation.replica_exchange(multiopenmm.RandomAdjacentExchangePairGenerator(0), multiopenmm.MetropolisAcceptanceCriterion(), 1, write_velocities=write_velocities)
+
+@pytest.mark.parametrize("stacks", ((0, 0, 0, 0, 0), (0, 0, 1, 1, 1), (0, 1, 2, 3, 4), (0, 1, 0, 0, 1)))
+@pytest.mark.parametrize("indices", ((), (0, 1, 2, 3, 4), (0,), (0, 2), (0, 1, 2), (0, 0, 1, 2, 0)))
+@pytest.mark.parametrize("step_count", (0, 1, 2, 10))
+@pytest.mark.parametrize("write_velocities", (False, True))
+@pytest.mark.parametrize("manager_kind", (0, 1, 2, 3))
+def test_simulation_replica_exchange_options(stacks, indices, step_count, write_velocities, manager_kind):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            templates = tuple(helpers_test.help_make_templates((3, 3)))
+            template_indices = (0, 0, 1, 1, 1)
+
+            if manager_kind == 0:
+                manager = multiopenmm.SynchronousManager()
+            elif manager_kind == 1:
+                manager = multiopenmm.WorkerPoolManager(multiopenmm.WorkerPoolKind.THREAD)
+            elif manager_kind == 2:
+                manager = multiopenmm.WorkerPoolManager(multiopenmm.WorkerPoolKind.PROCESS)
+            elif manager_kind == 3:
+                server = multiopenmm.socklib.QueueServer()
+                conn_path = os.path.join(temporary_path, "test.conn")
+                server.write_conn(conn_path)
+                client = subprocess.Popen([sys.executable, "-c", f"import multiopenmm, os; "
+                    f"os.chdir({temporary_path!r}); "
+                    f"multiopenmm.socklib.CallClient.from_conn({conn_path!r}, multiopenmm.socklib._DEFAULT_CONNECT_INTERVAL).run()"])
+                manager = multiopenmm.SocketServerManager(server)
+            else:
+                raise RuntimeError
+            simulation = multiopenmm.Simulation(templates, manager, multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = len(template_indices)
+            simulation.set_template_indices(template_indices)
+            simulation.set_stacks(stacks)
+            simulation.set_property_values("temperature", numpy.linspace(100, 500, 5))
+
+            simulation.set_positions(numpy.linspace(0, 4.4, 45).reshape(15, 3))
+            simulation.set_velocities(numpy.linspace(4.5, 8.9, 45).reshape(15, 3))
+
+            positions_initial = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+            velocities_initial = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+            attempt_count = 5 if len(indices) > 1 else 0
+            integration_results, swap_information_list = simulation.replica_exchange(
+                multiopenmm.RandomAdjacentExchangePairGenerator(attempt_count, True), multiopenmm.MetropolisAcceptanceCriterion(),
+                step_count, write_start=0, write_stop=step_count + 1, write_step=1, exchange_start=0, exchange_stop=step_count + 1, exchange_step=1,
+                write_velocities=write_velocities, indices=list(indices))
+
+            assert len(swap_information_list) == step_count + 1
+            for swap_information in swap_information_list:
+                assert swap_information.attempt_count == attempt_count
+                assert swap_information.instance_indices_1.shape == (attempt_count,)
+                assert swap_information.instance_indices_2.shape == (attempt_count,)
+                assert swap_information.instance_indices_2.shape == (attempt_count,)
+                assert swap_information.accepted.shape == (attempt_count,)
+                assert swap_information.probability.shape == (attempt_count,)
+
+            positions_final = [simulation.get_positions(instance_index) for instance_index in range(len(template_indices))]
+            velocities_final = [simulation.get_velocities(instance_index) for instance_index in range(len(template_indices))]
+
+            for index in range(len(template_indices)):
+                if index in indices and step_count:
+                    helpers_test.help_check_changed(positions_final[index], positions_initial[index])
+                    helpers_test.help_check_changed(velocities_final[index], velocities_initial[index])
+                elif index not in indices:
+                    helpers_test.help_check_equal(positions_final[index], positions_initial[index])
+                    helpers_test.help_check_equal(velocities_final[index], velocities_initial[index])
+
+            class TestExporter(multiopenmm.export.Exporter):
+                def __init__(self):
+                    self.data = [[] for index in range(len(template_indices))]
+                def export(self, get_frames):
+                    for index in range(len(template_indices)):
+                        self.data[index].extend(get_frames(index))
+            exporter = TestExporter()
+            multiopenmm.export_results(integration_results, (exporter,))
+            data = exporter.data
+
+            for index in range(len(template_indices)):
+                if index in indices:
+                    assert len(data[index]) == step_count + 1
+                    for frame in data[index]:
+                        assert "vectors" in frame
+                        assert "positions" in frame
+                        assert ("velocities" in frame) == write_velocities
+                else:
+                    assert not data[index]
+
+            if manager_kind == 3:
+                server._sock.close()
+                client.terminate()
+
+    finally:
+        multiopenmm.set_scratch_directory()
+
+@pytest.mark.parametrize("step_count", (0, 1, 2, 100))
+@pytest.mark.parametrize("write_stepping", HELP_STEPPINGS)
+@pytest.mark.parametrize("exchange_stepping", HELP_STEPPINGS)
+def test_simulation_replica_exchange_stepping(step_count, write_stepping, exchange_stepping):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            write_start, write_stop, write_step = write_stepping
+            write_count = 0
+            frame = write_start
+            while frame < write_stop:
+                if frame <= step_count:
+                    write_count += 1
+                frame += write_step
+
+            exchange_start, exchange_stop, exchange_step = exchange_stepping
+            exchange_count = 0
+            frame = exchange_start
+            while frame < exchange_stop:
+                if frame <= step_count:
+                    exchange_count += 1
+                frame += exchange_step
+
+            simulation = multiopenmm.Simulation(helpers_test.help_make_templates((1,)), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = 2
+
+            integration_results, swap_information_list = simulation.replica_exchange(
+                multiopenmm.RandomAdjacentExchangePairGenerator(1), multiopenmm.MetropolisAcceptanceCriterion(),
+                step_count, write_start=write_start, write_stop=write_stop, write_step=write_step,
+                exchange_start=exchange_start, exchange_stop=exchange_stop, exchange_step=exchange_step)
+
+            assert len(swap_information_list) == exchange_count
+            for swap_information in swap_information_list:
+                assert swap_information.attempt_count == 1
+
+            class TestExporter(multiopenmm.export.Exporter):
+                def __init__(self):
+                    self.data = [[] for index in range(simulation.instance_count)]
+                def export(self, get_frames):
+                    for index in range(simulation.instance_count):
+                        self.data[index].extend(get_frames(index))
+
+            exporter = TestExporter()
+            multiopenmm.export_results(integration_results, (exporter,))
+            data = exporter.data
+
+            for index in range(simulation.instance_count):
+                assert len(data[index]) == write_count
+                for frame in data[index]:
+                    assert "vectors" in frame
+                    assert "positions" in frame
+
+    finally:
+        multiopenmm.set_scratch_directory()
+
+@pytest.mark.parametrize("swap_count", (object(), None, 1.0))
+def test_random_adjacent_exchange_pair_generator_swap_count_type(swap_count):
+    with pytest.raises(TypeError):
+        multiopenmm.RandomAdjacentExchangePairGenerator(swap_count)
+
+@pytest.mark.parametrize("swap_count", (-10, -1))
+def test_random_adjacent_exchange_pair_generator_swap_count_value(swap_count):
+    with pytest.raises(ValueError):
+        multiopenmm.RandomAdjacentExchangePairGenerator(swap_count)
+
+@pytest.mark.parametrize("with_replacement", (object(), None, 0, 1))
+def test_random_adjacent_exchange_pair_generator_with_replacement_type(with_replacement):
+    with pytest.raises(TypeError):
+        multiopenmm.RandomAdjacentExchangePairGenerator(1, with_replacement)
+
+@pytest.mark.parametrize("swap_count", (0, 1, 2, 9, 10, 20))
+@pytest.mark.parametrize("with_replacement", (False, True))
+def test_random_adjacent_exchange_pair_generator(swap_count, with_replacement):
+    try:
+        with tempfile.TemporaryDirectory() as temporary_path:
+            multiopenmm.set_scratch_directory(temporary_path)
+
+            simulation = multiopenmm.Simulation(helpers_test.help_make_templates((1,)), multiopenmm.SynchronousManager(), multiopenmm.CanonicalEnsemble())
+            simulation.instance_count = 10
+
+            if swap_count >= simulation.instance_count and not with_replacement:
+                with pytest.raises(ValueError):
+                    simulation.replica_exchange(
+                        multiopenmm.RandomAdjacentExchangePairGenerator(swap_count, with_replacement), multiopenmm.MetropolisAcceptanceCriterion(),
+                        100, exchange_start=0, exchange_stop=101, exchange_step=1)
+
+            else:
+                integration_results, swap_information_list = simulation.replica_exchange(
+                    multiopenmm.RandomAdjacentExchangePairGenerator(swap_count, with_replacement), multiopenmm.MetropolisAcceptanceCriterion(),
+                    100, exchange_start=0, exchange_stop=101, exchange_step=1)
+
+                assert len(swap_information_list) == 101
+                for swap_information in swap_information_list:
+                    assert swap_information.attempt_count == swap_count
+
+    finally:
+        multiopenmm.set_scratch_directory()
 
 @pytest.mark.parametrize("thermostat", multiopenmm.Barostat)
 def test_canonical_ensemble_init_thermostat_type(thermostat):
