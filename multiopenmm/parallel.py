@@ -1336,8 +1336,8 @@ class Simulation:
             # next exchange attempt, and how many steps we need to simulate to
             # get there.
             integrate_count = exchange_index - step_index
+            result, broadcasted = self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, True, True, indices)
             if integrate_count:
-                result, broadcasted = self.integrate(integrate_count, *slice_write_range(step_index, step_index + integrate_count), write_velocities, True, True, indices)
                 results.append(result)
             step_index += integrate_count
 
