@@ -1,9 +1,14 @@
 MultiOpenMM: Flexible parallel molecular dynamics with OpenMM
 =============================================================
 
-🚧 🚧 **This library is a work in progress; some features may be incomplete,
-incompletely documented, or incompletely tested.  This file will be updated as
-development progresses.** 🚧 🚧 
+> [!NOTE]
+> **This project is NOT affiliated with the official OpenMM project in any
+> way whatsoever.  This was a research-related project that is now archived and
+> will not receive further updates.**
+
+> [!WARNING]
+> **This library is provided as-is; some features may be incomplete,
+> incompletely documented, or incompletely tested.**
 
 MultiOpenMM is a package that enables setting up and running parallel molecular
 dynamics simulations, including but not limited to replica exchange simulations,
